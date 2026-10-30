@@ -6,6 +6,7 @@ signal squad_order_change_requested(squad_number: int, order_id: String)
 
 const PLACEHOLDER_PORTRAIT := preload("res://Assets/mate_face_placeholder.svg")
 const TEST_FIELD_SCENE := preload("res://Scenes/test_field.tscn")
+const UNIT_STATUS_OVERLAY_SCRIPT := preload("res://Scripts/UI/unit_status_overlay.gd")
 @export var show_preview_data: bool = false
 
 @export var directive_library: DirectiveLibrary
@@ -16,6 +17,7 @@ var _squad_row: HBoxContainer
 var _camera_status_label: Label
 var _communication_panel: CommunicationPanel
 var _test_field: TestField
+var _unit_status_overlay: UnitStatusOverlay
 
 
 func _ready() -> void:
@@ -122,8 +124,12 @@ func _build_layout() -> void:
 	viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 	viewport_container.add_child(viewport)
 	_test_field = TEST_FIELD_SCENE.instantiate() as TestField
+	_test_field.squad_selection_requested.connect(_on_squad_selected)
 	viewport.add_child(_test_field)
 	_test_field.prepare()
+	_unit_status_overlay = UNIT_STATUS_OVERLAY_SCRIPT.new() as UnitStatusOverlay
+	viewport.add_child(_unit_status_overlay)
+	_unit_status_overlay.configure(_test_field)
 
 	_camera_status_label = Label.new()
 	_camera_status_label.text = "TEST FIELD  /  9 SAMPLE MATE"
@@ -160,6 +166,8 @@ func _on_squad_selected(squad_number: int) -> void:
 	_camera_status_label.text = "CAMERA FOCUS  /  SQUAD %02d" % squad_number
 	if _test_field != null:
 		_test_field.focus_squad(squad_number)
+	if _unit_status_overlay != null and squad_number > 0 and squad_number <= _squads.size():
+		_unit_status_overlay.set_selected_squad(squad_number, _squads[squad_number - 1].members)
 	squad_focus_requested.emit(squad_number)
 
 

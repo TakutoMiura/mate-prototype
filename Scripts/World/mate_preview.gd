@@ -10,16 +10,28 @@ var _accent_color := Color("#D39B4C")
 var _unit_state: Resource
 var _loadout: MateLoadout
 var _catalog: EquipmentCatalog
-var _unit_label := "SAMPLE MATE"
+var _status_bounds_corners: Array[Vector3] = []
 
 
-func configure(unit_state: Resource, catalog: EquipmentCatalog, accent_color: Color, unit_label: String) -> void:
+func configure(unit_state: Resource, catalog: EquipmentCatalog, accent_color: Color) -> void:
 	_unit_state = unit_state
 	_loadout = unit_state.get("loadout") as MateLoadout if unit_state != null else null
 	_catalog = catalog
 	_accent_color = accent_color
-	_unit_label = unit_label
 	_build_model()
+
+
+func get_status_bounds_corners() -> Array[Vector3]:
+	return _status_bounds_corners
+
+
+func _cache_status_bounds(has_back_unit: bool) -> void:
+	_status_bounds_corners.clear()
+	var top := 4.05 if has_back_unit else 2.9
+	for x in [-1.45, 1.45]:
+		for y in [0.0, top]:
+			for z in [-1.35, 1.15]:
+				_status_bounds_corners.append(Vector3(x, y, z))
 
 
 func _build_model() -> void:
@@ -32,6 +44,7 @@ func _build_model() -> void:
 		return
 	if not _loadout.is_compatible(_catalog):
 		push_warning("Test-field loadout contains incompatible equipment: %s" % _loadout.mate_id)
+	_cache_status_bounds(parts["back_unit"] != null)
 
 	_add_box("pelvis", Vector3(0.68, 0.32, 0.44), Vector3(0, 1.30, 0), FRAME_COLOR)
 	_add_box("torso", Vector3(0.90, 0.92, 0.54), Vector3(0, 1.91, 0), _accent_color.darkened(0.28))
@@ -52,7 +65,6 @@ func _build_model() -> void:
 		_add_box("forearm", Vector3(0.29, 0.42, 0.31), Vector3(side * 0.77, 1.21, 0.03), METAL_COLOR)
 
 	_add_equipment(parts)
-	_add_nameplate(mate, parts["back_unit"] != null)
 
 
 func _add_equipment(parts: Dictionary) -> void:
@@ -80,21 +92,6 @@ func _add_back_cannon() -> void:
 	_add_box("cannon_color_panel", Vector3(0.28, 0.48, 0.04), Vector3(-0.42, 2.56, -0.34), _accent_color)
 	_add_cylinder("cannon_barrel", 0.14, 1.65, Vector3(-0.42, 2.98, -0.55), METAL_COLOR)
 	_add_cylinder("cannon_muzzle", 0.18, 0.16, Vector3(-0.42, 3.83, -0.55), JOINT_COLOR)
-
-
-func _add_nameplate(mate: MateDefinition, has_back_unit: bool) -> void:
-	var label := Label3D.new()
-	label.name = "SampleLabel"
-	label.text = "%s\n%s\nLOAD %.0f / %.0f" % [_unit_label, mate.name, _loadout.total_weight(_catalog), mate.load_limit]
-	label.position = Vector3(0, 4.05 if has_back_unit else 3.22, 0)
-	label.font_size = 32
-	label.pixel_size = 0.004
-	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	label.no_depth_test = true
-	label.modulate = Color("#EDF3F4")
-	label.outline_size = 8
-	label.outline_modulate = Color("#10181D")
-	add_child(label)
 
 
 func _add_box(part_name: String, dimensions: Vector3, position: Vector3, color: Color) -> void:
