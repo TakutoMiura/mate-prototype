@@ -1,0 +1,3 @@
+interface:
+  display_name: "Godot Refactor"
+  short_description: "Refactor review findings while preserving behavior"

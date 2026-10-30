@@ -1,0 +1,3 @@
+interface:
+  display_name: "Godot Performance Review"
+  short_description: "Measure and assess RTS performance bottlenecks"

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Godot Logic Review"
+  short_description: "Review RTS behavior against written specifications"
