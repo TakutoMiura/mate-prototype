@@ -1,0 +1,8 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Scripts/World/test_field.gd" id="1_test_field"]
+[ext_resource type="Resource" path="res://Data/Samples/sample_equipment_catalog.tres" id="2_catalog"]
+
+[node name="TestField" type="Node3D"]
+script = ExtResource("1_test_field")
+equipment_catalog = ExtResource("2_catalog")

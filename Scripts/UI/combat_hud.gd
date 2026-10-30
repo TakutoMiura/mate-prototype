@@ -5,6 +5,7 @@ signal squad_focus_requested(squad_number: int)
 signal squad_order_change_requested(squad_number: int, order_id: String)
 
 const PLACEHOLDER_PORTRAIT := preload("res://Assets/mate_face_placeholder.svg")
+const TEST_FIELD_SCENE := preload("res://Scenes/test_field.tscn")
 @export var show_preview_data: bool = false
 
 @export var directive_library: DirectiveLibrary
@@ -14,6 +15,7 @@ var _selected_squad: int = 0
 var _squad_row: HBoxContainer
 var _camera_status_label: Label
 var _communication_panel: CommunicationPanel
+var _test_field: TestField
 
 
 func _ready() -> void:
@@ -104,14 +106,33 @@ func _build_layout() -> void:
 	camera_title.add_theme_font_size_override("font_size", 11)
 	battlefield_layout.add_child(camera_title)
 
+	var viewport_overlay := Control.new()
+	viewport_overlay.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	viewport_overlay.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	battlefield_layout.add_child(viewport_overlay)
+	var viewport_container := SubViewportContainer.new()
+	viewport_container.name = "TestFieldViewportContainer"
+	viewport_container.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	viewport_container.stretch = true
+	viewport_overlay.add_child(viewport_container)
+
+	var viewport := SubViewport.new()
+	viewport.name = "TestFieldViewport"
+	viewport.size = Vector2i(1280, 720)
+	viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+	viewport_container.add_child(viewport)
+	_test_field = TEST_FIELD_SCENE.instantiate() as TestField
+	viewport.add_child(_test_field)
+	_test_field.prepare()
+
 	_camera_status_label = Label.new()
-	_camera_status_label.text = "CAMERA OFFLINE  /  DEMO MODE"
-	_camera_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_camera_status_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_camera_status_label.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_camera_status_label.add_theme_color_override("font_color", Color("#A9BAC1"))
-	_camera_status_label.add_theme_font_size_override("font_size", 18)
-	battlefield_layout.add_child(_camera_status_label)
+	_camera_status_label.text = "TEST FIELD  /  9 SAMPLE MATE"
+	_camera_status_label.position = Vector2(8, 6)
+	_camera_status_label.size = Vector2(250, 22)
+	_camera_status_label.add_theme_color_override("font_color", Color("#D7E0E3"))
+	_camera_status_label.add_theme_font_size_override("font_size", 11)
+	_camera_status_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	viewport_overlay.add_child(_camera_status_label)
 
 	_communication_panel = CommunicationPanel.new()
 	layout.add_child(_communication_panel)
@@ -137,6 +158,8 @@ func _on_squad_selected(squad_number: int) -> void:
 	_selected_squad = squad_number
 	_refresh_squad_panels()
 	_camera_status_label.text = "CAMERA FOCUS  /  SQUAD %02d" % squad_number
+	if _test_field != null:
+		_test_field.focus_squad(squad_number)
 	squad_focus_requested.emit(squad_number)
 
 
@@ -159,21 +182,20 @@ func _panel_style(color: Color) -> StyleBoxFlat:
 
 func _create_preview_squads() -> Array[HudSquadData]:
 	var squads: Array[HudSquadData] = []
-	squads.append(_make_preview_squad(1, _basic_directive_id(), [
-		_make_preview_mate("MATE-01", 150, 300, 100, 200, true, 18, 24),
-		_make_preview_mate("MATE-02", 230, 300, 170, 200, true, 15, 24),
-		_make_preview_mate("MATE-03", 260, 300, 160, 200, false, 0, 0),
-	]))
-	squads.append(_make_preview_squad(2, "MOVE", [
-		_make_preview_mate("MATE-04", 0, 300, 0, 200, true, 6, 24),
-		_make_preview_mate("MATE-05", 180, 300, 100, 200, true, 12, 24),
-		_make_preview_mate("MATE-06", 190, 300, 100, 200, true, 10, 24),
-	]))
-	squads.append(_make_preview_squad(3, "HOLD", [
-		_make_preview_mate("MATE-07", 0, 300, 0, 200, true, 4, 24),
-		_make_preview_mate("MATE-08", 0, 300, 0, 200, true, 0, 24),
-		_make_preview_mate("MATE-09", 170, 300, 60, 200, true, 6, 24),
-	]))
+	var catalog: EquipmentCatalog = _test_field.equipment_catalog if _test_field != null else null
+	if catalog == null or _test_field == null:
+		push_error("Preview HUD requires a prepared test field.")
+		return squads
+	for squad_index in range(3):
+		var members: Array[HudMateData] = []
+		for unit_state in _test_field.get_squad_states(squad_index + 1):
+			var mate := HudMateData.new()
+			if not mate.configure_from_state(unit_state, catalog):
+				push_warning("Could not read sample unit state for squad %d." % (squad_index + 1))
+				continue
+			mate.portrait = PLACEHOLDER_PORTRAIT
+			members.append(mate)
+		squads.append(_make_preview_squad(squad_index + 1, _basic_directive_id(), members))
 	return squads
 
 
@@ -183,24 +205,6 @@ func _make_preview_squad(number: int, order_id: String, mates: Array) -> HudSqua
 	squad.active_order_id = order_id
 	squad.members.assign(mates)
 	return squad
-
-
-func _make_preview_mate(name: String, hp: float, max_hp: float, shield: float, max_shield: float, back_unit: bool, ammo: float, max_ammo: float) -> HudMateData:
-	var mate := HudMateData.new()
-	_fill_preview_mate(mate, name, hp, max_hp, shield, max_shield, back_unit, ammo, max_ammo)
-	return mate
-
-
-func _fill_preview_mate(mate: HudMateData, name: String, hp: float, max_hp: float, shield: float, max_shield: float, back_unit: bool, ammo: float, max_ammo: float) -> void:
-	mate.display_name = name
-	mate.current_hp = hp
-	mate.maximum_hp = max_hp
-	mate.current_shield_hp = shield
-	mate.maximum_shield_hp = max_shield
-	mate.has_back_unit = back_unit
-	mate.current_ammo = ammo
-	mate.maximum_ammo = max_ammo
-	mate.portrait = PLACEHOLDER_PORTRAIT
 
 
 func _create_default_directive_library() -> DirectiveLibrary:
