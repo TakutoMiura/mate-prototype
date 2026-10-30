@@ -28,8 +28,8 @@ func _ready() -> void:
 
 func configure(test_field: TestField) -> void:
 	_test_field = test_field
-	if not _test_field.camera_changed.is_connected(_on_layout_changed):
-		_test_field.camera_changed.connect(_on_layout_changed)
+	if not _test_field.view_changed.is_connected(_on_layout_changed):
+		_test_field.view_changed.connect(_on_layout_changed)
 
 
 func set_selected_squad(squad_number: int, members: Array[HudMateData]) -> void:
