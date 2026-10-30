@@ -51,6 +51,8 @@ var _squad_waypoints: Array[Array] = []
 var _squad_headings: Array[float] = []
 var _waypoint_visual: MeshInstance3D
 var _waypoint_visual_mesh: ImmediateMesh
+var _waypoint_origin_visual: MeshInstance3D
+var _waypoint_origin_mesh: ImmediateMesh
 var _waypoint_visual_material: StandardMaterial3D
 var _prepared := false
 
@@ -300,7 +302,10 @@ func _process_squad_movement(delta: float) -> bool:
 	if any_active:
 		view_changed.emit()
 	if route_changed or any_positions_moved:
-		_refresh_waypoint_visual()
+		if route_changed:
+			_refresh_waypoint_visual()
+		if any_positions_moved:
+			_refresh_waypoint_origin_visual()
 	return any_active
 
 
@@ -351,17 +356,21 @@ func _refresh_waypoint_visual() -> void:
 		return
 	_waypoint_visual_mesh.clear_surfaces()
 	if _selected_squad_number <= 0 or _selected_squad_number > _squad_waypoints.size():
+		_refresh_waypoint_origin_visual()
 		return
 	var route: Array = _squad_waypoints[_selected_squad_number - 1]
 	if route.is_empty():
+		_refresh_waypoint_origin_visual()
 		return
 	_waypoint_visual_material.albedo_color = SQUAD_COLORS[_selected_squad_number - 1]
 	_waypoint_visual_mesh.surface_begin(Mesh.PRIMITIVE_LINES, _waypoint_visual_material)
-	var previous_point := get_squad_point(_selected_squad_number) + Vector3(0, WAYPOINT_VISUAL_HEIGHT, 0)
-	for waypoint in route:
+	var previous_point: Vector3 = route[0] + Vector3(0, WAYPOINT_VISUAL_HEIGHT, 0)
+	for index in range(route.size()):
+		var waypoint: Vector3 = route[index]
 		var marker_center: Vector3 = waypoint + Vector3(0, WAYPOINT_VISUAL_HEIGHT, 0)
-		_waypoint_visual_mesh.surface_add_vertex(previous_point)
-		_waypoint_visual_mesh.surface_add_vertex(marker_center)
+		if index > 0:
+			_waypoint_visual_mesh.surface_add_vertex(previous_point)
+			_waypoint_visual_mesh.surface_add_vertex(marker_center)
 		for segment in range(WAYPOINT_MARKER_SEGMENTS):
 			var first_angle := TAU * float(segment) / WAYPOINT_MARKER_SEGMENTS
 			var second_angle := TAU * float(segment + 1) / WAYPOINT_MARKER_SEGMENTS
@@ -379,6 +388,23 @@ func _refresh_waypoint_visual() -> void:
 			_waypoint_visual_mesh.surface_add_vertex(second_marker_point)
 		previous_point = marker_center
 	_waypoint_visual_mesh.surface_end()
+	_refresh_waypoint_origin_visual()
+
+
+func _refresh_waypoint_origin_visual() -> void:
+	if _waypoint_origin_mesh == null:
+		return
+	_waypoint_origin_mesh.clear_surfaces()
+	if _selected_squad_number <= 0 or _selected_squad_number > _squad_waypoints.size():
+		return
+	var route: Array = _squad_waypoints[_selected_squad_number - 1]
+	if route.is_empty():
+		return
+	var first_waypoint: Vector3 = route[0]
+	_waypoint_origin_mesh.surface_begin(Mesh.PRIMITIVE_LINES, _waypoint_visual_material)
+	_waypoint_origin_mesh.surface_add_vertex(get_squad_point(_selected_squad_number) + Vector3(0, WAYPOINT_VISUAL_HEIGHT, 0))
+	_waypoint_origin_mesh.surface_add_vertex(first_waypoint + Vector3(0, WAYPOINT_VISUAL_HEIGHT, 0))
+	_waypoint_origin_mesh.surface_end()
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
@@ -564,6 +590,12 @@ func _build_ground() -> void:
 	_waypoint_visual.mesh = _waypoint_visual_mesh
 	_waypoint_visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_waypoint_visual)
+	_waypoint_origin_mesh = ImmediateMesh.new()
+	_waypoint_origin_visual = MeshInstance3D.new()
+	_waypoint_origin_visual.name = "SelectedSquadWaypointOrigin"
+	_waypoint_origin_visual.mesh = _waypoint_origin_mesh
+	_waypoint_origin_visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_waypoint_origin_visual)
 
 	for index in range(3):
 		var pad := MeshInstance3D.new()
