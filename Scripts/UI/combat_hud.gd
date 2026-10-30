@@ -14,8 +14,6 @@ var _selected_squad: int = 0
 var _squad_row: HBoxContainer
 var _camera_status_label: Label
 var _communication_panel: CommunicationPanel
-var _directive_name_dialog: ConfirmationDialog
-var _directive_name_input: LineEdit
 
 
 func _ready() -> void:
@@ -117,21 +115,6 @@ func _build_layout() -> void:
 
 	_communication_panel = CommunicationPanel.new()
 	layout.add_child(_communication_panel)
-	_build_directive_name_dialog()
-
-
-func _build_directive_name_dialog() -> void:
-	_directive_name_dialog = ConfirmationDialog.new()
-	_directive_name_dialog.title = "NEW DIRECTIVE"
-	_directive_name_dialog.dialog_text = "共通ライブラリに登録する名前を入力してください。"
-	_directive_name_dialog.confirmed.connect(_on_directive_name_confirmed)
-	add_child(_directive_name_dialog)
-
-	_directive_name_input = LineEdit.new()
-	_directive_name_input.placeholder_text = "DIRECTIVE NAME"
-	_directive_name_input.custom_minimum_size = Vector2(320, 0)
-	_directive_name_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_directive_name_dialog.add_child(_directive_name_input)
 
 
 func _refresh_squad_panels() -> void:
@@ -146,7 +129,6 @@ func _refresh_squad_panels() -> void:
 		panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		panel.squad_selected.connect(_on_squad_selected)
 		panel.order_requested.connect(_on_order_requested)
-		panel.directive_creation_requested.connect(_on_directive_creation_requested)
 		_squad_row.add_child(panel)
 		panel.set_squad_data(squad, squad.squad_number == _selected_squad, directive_library)
 
@@ -164,26 +146,6 @@ func _on_order_requested(squad_number: int, order_id: String) -> void:
 			squad.active_order_id = order_id
 			break
 	squad_order_change_requested.emit(squad_number, order_id)
-
-
-func _on_directive_creation_requested(_squad_number: int) -> void:
-	_directive_name_input.text = ""
-	_directive_name_dialog.dialog_text = "共通ライブラリに登録する名前を入力してください。"
-	_directive_name_dialog.popup_centered()
-	_directive_name_input.grab_focus.call_deferred()
-
-
-func _on_directive_name_confirmed() -> void:
-	var directive_name := _directive_name_input.text.strip_edges()
-	if directive_name.is_empty():
-		_directive_name_dialog.dialog_text = "名前を入力してください。"
-		_directive_name_dialog.popup_centered.call_deferred()
-		return
-	if directive_library.register_directive(directive_name) == null:
-		_directive_name_dialog.dialog_text = "同じ名前のDIRECTIVEが既にあります。別の名前を入力してください。"
-		_directive_name_dialog.popup_centered.call_deferred()
-		return
-	_refresh_squad_panels()
 
 
 func _panel_style(color: Color) -> StyleBoxFlat:
