@@ -24,6 +24,9 @@ func configure(unit_state: Resource, catalog: EquipmentCatalog, accent_color: Co
 func get_status_bounds_corners() -> Array[Vector3]:
 	return _status_bounds_corners
 
+func is_alive() -> bool:
+	return _unit_state != null and float(_unit_state.get('current_hp')) > 0.0
+
 
 func _cache_status_bounds(has_back_unit: bool) -> void:
 	_status_bounds_corners.clear()
