@@ -1,0 +1,16 @@
+# Godot editor cache, imported assets, and generated metadata
+.godot/
+
+# Godot export output
+/android/
+/build/
+/dist/
+
+# Local machine files
+*.lnk
+.DS_Store
+Thumbs.db
+
+# Temporary and log files
+*.tmp
+*.log
