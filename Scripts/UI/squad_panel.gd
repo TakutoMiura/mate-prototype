@@ -21,6 +21,8 @@ var _order_selector: OptionButton
 var _order_ids: Array[String] = []
 var _available_directives: Array[DirectiveDefinition] = []
 var _content: VBoxContainer
+var _member_gauges: Dictionary = {}
+var _member_callbacks: Dictionary = {}
 
 
 func _ready() -> void:
@@ -45,6 +47,7 @@ func set_squad_data(data: HudSquadData, selected: bool, directive_library: Direc
 
 
 func _rebuild() -> void:
+	_member_gauges.clear()
 	for child in get_children():
 		remove_child(child)
 		child.queue_free()
@@ -107,7 +110,26 @@ func _rebuild() -> void:
 
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	for mate in _data.members:
+		if mate == null:
+			continue
+		var mate_id := mate.get_instance_id()
+		if not _member_callbacks.has(mate_id):
+			var callback := _on_member_state_changed.bind(mate)
+			_member_callbacks[mate_id] = callback
+			mate.changed.connect(callback)
 		_content.add_child(_create_mate_row(mate))
+
+
+func _on_member_state_changed(mate: HudMateData) -> void:
+	var gauges: Array = _member_gauges.get(mate.get_instance_id(), [])
+	if gauges.size() != 3:
+		return
+	gauges[0].set_values(mate.current_hp, mate.maximum_hp)
+	gauges[1].set_values(mate.current_shield_hp, mate.maximum_shield_hp)
+	gauges[2].set_values(mate.current_ammo, mate.maximum_ammo, not mate.has_ammo_display())
+	var style := get_theme_stylebox("panel") as StyleBoxFlat
+	if style != null:
+		style.bg_color = _state_color(SquadCondition.classify(_data.members))
 
 
 func _create_mate_row(mate: HudMateData) -> Control:
@@ -131,13 +153,15 @@ func _create_mate_row(mate: HudMateData) -> Control:
 	gauges.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	gauges.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(gauges)
-	gauges.add_child(_create_gauge_row("HP", mate.current_hp, mate.maximum_hp, false, HP_GAUGE_COLOR))
-	gauges.add_child(_create_gauge_row("SH", mate.current_shield_hp, mate.maximum_shield_hp, false, HP_GAUGE_COLOR))
-	gauges.add_child(_create_gauge_row("AMMO", mate.current_ammo, mate.maximum_ammo, not mate.has_ammo_display()))
+	var member_gauges: Array[HudGauge] = []
+	gauges.add_child(_create_gauge_row("HP", mate.current_hp, mate.maximum_hp, false, HP_GAUGE_COLOR, member_gauges))
+	gauges.add_child(_create_gauge_row("SH", mate.current_shield_hp, mate.maximum_shield_hp, false, HP_GAUGE_COLOR, member_gauges))
+	gauges.add_child(_create_gauge_row("AMMO", mate.current_ammo, mate.maximum_ammo, not mate.has_ammo_display(), HudGauge.FILL, member_gauges))
+	_member_gauges[mate.get_instance_id()] = member_gauges
 	return row
 
 
-func _create_gauge_row(caption: String, current: float, maximum: float, unavailable: bool = false, fill_color: Color = HudGauge.FILL) -> Control:
+func _create_gauge_row(caption: String, current: float, maximum: float, unavailable: bool, fill_color: Color, registry: Array[HudGauge]) -> Control:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 3)
 	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -156,6 +180,7 @@ func _create_gauge_row(caption: String, current: float, maximum: float, unavaila
 	gauge.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	gauge.set_values(current, maximum, unavailable, fill_color)
 	row.add_child(gauge)
+	registry.append(gauge)
 	return row
 
 
