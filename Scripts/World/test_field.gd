@@ -1,23 +1,48 @@
 class_name TestField
 extends Node3D
 
+signal squad_selection_requested(squad_number: int)
+signal camera_changed
+
 const MATE_UNIT_STATE_SCRIPT := preload("res://Scripts/Data/mate_unit_state.gd")
 const SQUAD_COLORS := [Color("#D39B4C"), Color("#6A9AA9"), Color("#879C68")]
 const FLOOR_EXTENT := 30.0
 const SQUAD_SPACING := 12.0
 const MATE_SPACING := 2.7
 const CAMERA_FOCUS_DURATION := 0.9
+const CAMERA_INITIAL_TARGET := Vector3(0, 1.35, 0)
+const CAMERA_INITIAL_OFFSET := Vector3(0, 14.65, 29.0)
+const CAMERA_FOCUS_DISTANCE := 14.0
+
+@export_group("Camera Controls")
+@export_range(1.0, 40.0, 0.5) var pan_speed := 12.0
+@export_range(8.0, 80.0, 1.0) var minimum_distance := 8.0
+@export_range(12.0, 120.0, 1.0) var maximum_distance := 60.0
+@export_range(1.01, 1.5, 0.01) var zoom_multiplier := 1.12
+@export_range(0.001, 0.02, 0.001) var rotation_radians_per_pixel := 0.005
+@export_range(5.0, 45.0, 1.0) var minimum_elevation_degrees := 15.0
+@export_range(45.0, 85.0, 1.0) var maximum_elevation_degrees := 75.0
 
 @export var equipment_catalog: EquipmentCatalog
 
 var _camera: Camera3D
 var _camera_tween: Tween
+var _camera_target := CAMERA_INITIAL_TARGET
+var _camera_yaw := 0.0
+var _camera_elevation := 0.0
+var _camera_distance := 0.0
+var _follow_squad_number := 0
+var _selected_squad_number := 0
+var _is_rotating := false
+var _continuous_rendering := false
 var _squad_centers: Array[Vector3] = []
 var _squad_states: Array[Array] = []
+var _squad_mates: Array[Array] = []
 var _prepared := false
 
 
 func _ready() -> void:
+	_register_camera_actions()
 	prepare()
 
 
@@ -44,27 +69,154 @@ func get_squad_states(squad_number: int) -> Array[Resource]:
 	return result
 
 
+func get_squad_mates(squad_number: int) -> Array[MatePreview]:
+	var result: Array[MatePreview] = []
+	var index := squad_number - 1
+	if index < 0 or index >= _squad_mates.size():
+		return result
+	for mate in _squad_mates[index]:
+		result.append(mate as MatePreview)
+	return result
+
+
+func get_camera() -> Camera3D:
+	return _camera
+
+
 func focus_squad(squad_number: int) -> void:
-	if _camera == null or _squad_centers.is_empty():
+	if _squad_centers.is_empty():
+		return
+	_selected_squad_number = clampi(squad_number, 1, _squad_centers.size())
+	_follow_squad_number = 0
+	var index := _selected_squad_number - 1
+	_animate_camera_to(_squad_focus_point(index), _camera_yaw, _camera_elevation, CAMERA_FOCUS_DISTANCE)
+
+
+func follow_squad(squad_number: int) -> void:
+	if _squad_centers.is_empty():
 		return
 	var index := clampi(squad_number - 1, 0, _squad_centers.size() - 1)
-	var target := _squad_centers[index] + Vector3(0, 1.3, 0)
-	var destination_position := target + Vector3(0, 5.8, 12.5)
-	var destination_basis := Basis.looking_at(target - destination_position, Vector3.UP)
-	if _camera_tween != null and _camera_tween.is_running():
-		_camera_tween.kill()
-	var viewport := get_viewport() as SubViewport
-	if viewport != null:
-		viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	var start_position := _camera.position
-	var start_rotation := _camera.quaternion
-	var destination_rotation := destination_basis.get_rotation_quaternion()
+	_selected_squad_number = index + 1
+	_follow_squad_number = index + 1
+	_animate_camera_to(_squad_focus_point(index), _camera_yaw, _camera_elevation, CAMERA_FOCUS_DISTANCE)
+
+
+func _finish_camera_transition() -> void:
+	_set_continuous_rendering(false)
+
+
+func _process(delta: float) -> void:
+	var pan_input := Vector2(
+		float(Input.is_action_pressed("camera_pan_right")) - float(Input.is_action_pressed("camera_pan_left")),
+		float(Input.is_action_pressed("camera_pan_backward")) - float(Input.is_action_pressed("camera_pan_forward"))
+	)
+	if pan_input.length_squared() > 0.0:
+		_follow_squad_number = 0
+		var forward := -_camera.global_basis.z
+		forward.y = 0.0
+		forward = forward.normalized()
+		var right := _camera.global_basis.x
+		right.y = 0.0
+		right = right.normalized()
+		var movement := (right * pan_input.x + forward * -pan_input.y).normalized()
+		_camera_target += movement * pan_speed * delta
+		_cancel_camera_tween()
+		_apply_camera_pose()
+		_set_continuous_rendering(true)
+		return
+
+	if _follow_squad_number > 0 and _follow_squad_number <= _squad_centers.size():
+		var follow_target := _squad_focus_point(_follow_squad_number - 1)
+		if not _camera_target.is_equal_approx(follow_target):
+			_camera_target = follow_target
+			_apply_camera_pose()
+			_set_continuous_rendering(true)
+			return
+
+	if not _is_rotating and (_camera_tween == null or not _camera_tween.is_running()):
+		_set_continuous_rendering(false)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_MIDDLE:
+			_is_rotating = event.pressed
+			if _is_rotating:
+				_follow_squad_number = 0
+				_cancel_camera_tween()
+			_set_continuous_rendering(_is_rotating)
+			get_viewport().set_input_as_handled()
+		elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_follow_squad_number = 0
+			_camera_distance = maxf(minimum_distance, _camera_distance / zoom_multiplier)
+			_cancel_camera_tween()
+			_apply_camera_pose()
+			_set_continuous_rendering(false)
+			get_viewport().set_input_as_handled()
+		elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_follow_squad_number = 0
+			_camera_distance = minf(maximum_distance, _camera_distance * zoom_multiplier)
+			_cancel_camera_tween()
+			_apply_camera_pose()
+			_set_continuous_rendering(false)
+			get_viewport().set_input_as_handled()
+	elif event is InputEventMouseMotion and _is_rotating:
+		_follow_squad_number = 0
+		_camera_yaw = wrapf(_camera_yaw - event.relative.x * rotation_radians_per_pixel, -PI, PI)
+		_camera_elevation = clampf(
+			_camera_elevation + event.relative.y * rotation_radians_per_pixel,
+			deg_to_rad(minimum_elevation_degrees),
+			deg_to_rad(maximum_elevation_degrees)
+		)
+		_apply_camera_pose()
+		get_viewport().set_input_as_handled()
+
+
+func _unhandled_key_input(event: InputEvent) -> void:
+	if not event is InputEventKey or not event.pressed or event.echo:
+		return
+	if Input.is_action_just_pressed("select_squad_1"):
+		squad_selection_requested.emit(1)
+		get_viewport().set_input_as_handled()
+	elif Input.is_action_just_pressed("select_squad_2"):
+		squad_selection_requested.emit(2)
+		get_viewport().set_input_as_handled()
+	elif Input.is_action_just_pressed("select_squad_3"):
+		squad_selection_requested.emit(3)
+		get_viewport().set_input_as_handled()
+	if Input.is_action_just_pressed("camera_focus_selected"):
+		if _selected_squad_number > 0:
+			follow_squad(_selected_squad_number)
+			get_viewport().set_input_as_handled()
+	elif Input.is_action_just_pressed("camera_reset"):
+		_follow_squad_number = 0
+		_animate_camera_to(
+			CAMERA_INITIAL_TARGET,
+			0.0,
+			atan2(CAMERA_INITIAL_OFFSET.y, CAMERA_INITIAL_OFFSET.z),
+			CAMERA_INITIAL_OFFSET.length()
+		)
+		get_viewport().set_input_as_handled()
+
+
+func _animate_camera_to(target: Vector3, yaw: float, elevation: float, distance: float) -> void:
+	if _camera == null:
+		return
+	_cancel_camera_tween()
+	_set_continuous_rendering(true)
+	var start_target := _camera_target
+	var start_yaw := _camera_yaw
+	var start_elevation := _camera_elevation
+	var start_distance := _camera_distance
 	_camera_tween = create_tween()
 	_camera_tween.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	_camera_tween.tween_method(
 		func(progress: float) -> void:
-			_camera.position = start_position.lerp(destination_position, progress)
-			_camera.quaternion = start_rotation.slerp(destination_rotation, progress),
+			_camera_target = start_target.lerp(target, progress)
+			_camera_yaw = lerp_angle(start_yaw, yaw, progress)
+			_camera_elevation = lerpf(start_elevation, elevation, progress)
+			_camera_distance = lerpf(start_distance, distance, progress)
+			_apply_camera_pose(),
 		0.0,
 		1.0,
 		CAMERA_FOCUS_DURATION
@@ -72,10 +224,65 @@ func focus_squad(squad_number: int) -> void:
 	_camera_tween.finished.connect(_finish_camera_transition)
 
 
-func _finish_camera_transition() -> void:
+func _apply_camera_pose() -> void:
+	if _camera == null:
+		return
+	var horizontal_distance := cos(_camera_elevation) * _camera_distance
+	_camera.position = _camera_target + Vector3(
+		sin(_camera_yaw) * horizontal_distance,
+		sin(_camera_elevation) * _camera_distance,
+		cos(_camera_yaw) * horizontal_distance
+	)
+	_camera.look_at(_camera_target, Vector3.UP)
+	camera_changed.emit()
+
+
+func request_render() -> void:
+	var viewport := get_viewport() as SubViewport
+	if viewport != null and not _continuous_rendering:
+		viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+
+
+func _cancel_camera_tween() -> void:
+	if _camera_tween != null and _camera_tween.is_running():
+		_camera_tween.kill()
+	_camera_tween = null
+
+
+func _set_continuous_rendering(enabled: bool) -> void:
+	if _continuous_rendering == enabled:
+		return
+	_continuous_rendering = enabled
 	var viewport := get_viewport() as SubViewport
 	if viewport != null:
-		viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+		viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if enabled else SubViewport.UPDATE_ONCE
+
+
+func _squad_focus_point(index: int) -> Vector3:
+	return _squad_centers[index] + Vector3(0, 1.3, 0)
+
+
+func _register_camera_actions() -> void:
+	_register_key_action("camera_pan_forward", KEY_W)
+	_register_key_action("camera_pan_backward", KEY_S)
+	_register_key_action("camera_pan_left", KEY_A)
+	_register_key_action("camera_pan_right", KEY_D)
+	_register_key_action("camera_focus_selected", KEY_F)
+	_register_key_action("camera_reset", KEY_HOME)
+	_register_key_action("select_squad_1", KEY_1)
+	_register_key_action("select_squad_2", KEY_2)
+	_register_key_action("select_squad_3", KEY_3)
+
+
+func _register_key_action(action_name: StringName, key: Key) -> void:
+	if not InputMap.has_action(action_name):
+		InputMap.add_action(action_name)
+	for existing_event in InputMap.action_get_events(action_name):
+		if existing_event is InputEventKey and existing_event.physical_keycode == key:
+			return
+	var key_event := InputEventKey.new()
+	key_event.physical_keycode = key
+	InputMap.action_add_event(action_name, key_event)
 
 
 func _request_viewport_render() -> void:
@@ -157,11 +364,13 @@ func _build_ground() -> void:
 func _build_camera() -> void:
 	_camera = Camera3D.new()
 	_camera.name = "TestFieldCamera"
-	_camera.position = Vector3(0, 16.0, 29.0)
 	_camera.fov = 48.0
 	_camera.current = true
 	add_child(_camera)
-	_camera.look_at(Vector3(0, 1.35, 0), Vector3.UP)
+	_camera_target = CAMERA_INITIAL_TARGET
+	_camera_distance = CAMERA_INITIAL_OFFSET.length()
+	_camera_elevation = atan2(CAMERA_INITIAL_OFFSET.y, CAMERA_INITIAL_OFFSET.z)
+	_apply_camera_pose()
 
 
 func _build_sample_mates() -> void:
@@ -175,6 +384,7 @@ func _build_sample_mates() -> void:
 		var squad_center := Vector3((squad_index - 1) * SQUAD_SPACING, 0, 0)
 		_squad_centers.append(squad_center)
 		var squad_states: Array[Resource] = []
+		var squad_mates: Array[MatePreview] = []
 		for mate_index in range(3):
 			var loadout := equipment_catalog.sample_loadouts[0 if squad_index == 0 else 1]
 			var unit_state: Variant = MATE_UNIT_STATE_SCRIPT.new()
@@ -187,8 +397,7 @@ func _build_sample_mates() -> void:
 			mate.configure(
 				unit_state,
 				equipment_catalog,
-				SQUAD_COLORS[squad_index],
-				"SQUAD %02d / UNIT %02d" % [squad_index + 1, mate_index + 1]
+				SQUAD_COLORS[squad_index]
 			)
 			mate.position = Vector3(
 				squad_center.x + (mate_index - 1) * MATE_SPACING,
@@ -196,5 +405,7 @@ func _build_sample_mates() -> void:
 				0
 			)
 			squad_states.append(unit_state)
+			squad_mates.append(mate)
 			add_child(mate)
 		_squad_states.append(squad_states)
+		_squad_mates.append(squad_mates)
