@@ -6,10 +6,12 @@ const SQUAD_COLORS := [Color("#D39B4C"), Color("#6A9AA9"), Color("#879C68")]
 const FLOOR_EXTENT := 30.0
 const SQUAD_SPACING := 12.0
 const MATE_SPACING := 2.7
+const CAMERA_FOCUS_DURATION := 0.9
 
 @export var equipment_catalog: EquipmentCatalog
 
 var _camera: Camera3D
+var _camera_tween: Tween
 var _squad_centers: Array[Vector3] = []
 var _squad_states: Array[Array] = []
 var _prepared := false
@@ -47,9 +49,33 @@ func focus_squad(squad_number: int) -> void:
 		return
 	var index := clampi(squad_number - 1, 0, _squad_centers.size() - 1)
 	var target := _squad_centers[index] + Vector3(0, 1.3, 0)
-	_camera.position = target + Vector3(0, 5.8, 12.5)
-	_camera.look_at(target, Vector3.UP)
-	_request_viewport_render()
+	var destination_position := target + Vector3(0, 5.8, 12.5)
+	var destination_basis := Basis.looking_at(target - destination_position, Vector3.UP)
+	if _camera_tween != null and _camera_tween.is_running():
+		_camera_tween.kill()
+	var viewport := get_viewport() as SubViewport
+	if viewport != null:
+		viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	var start_position := _camera.position
+	var start_rotation := _camera.quaternion
+	var destination_rotation := destination_basis.get_rotation_quaternion()
+	_camera_tween = create_tween()
+	_camera_tween.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_camera_tween.tween_method(
+		func(progress: float) -> void:
+			_camera.position = start_position.lerp(destination_position, progress)
+			_camera.quaternion = start_rotation.slerp(destination_rotation, progress),
+		0.0,
+		1.0,
+		CAMERA_FOCUS_DURATION
+	)
+	_camera_tween.finished.connect(_finish_camera_transition)
+
+
+func _finish_camera_transition() -> void:
+	var viewport := get_viewport() as SubViewport
+	if viewport != null:
+		viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 
 
 func _request_viewport_render() -> void:
