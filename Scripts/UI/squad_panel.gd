@@ -3,6 +3,7 @@ extends PanelContainer
 
 signal squad_selected(squad_number: int)
 signal order_requested(squad_number: int, order_id: String)
+signal directive_creation_requested(squad_number: int)
 
 const MATE_ICON := preload("res://Assets/mate_face_placeholder.svg")
 const PANEL_SURFACE := Color("#202C33")
@@ -91,6 +92,14 @@ func _rebuild() -> void:
 	if not _inactive:
 		_order_selector.select(_order_ids.find(_data.active_order_id))
 	header.add_child(_order_selector)
+
+	var add_directive_button := Button.new()
+	add_directive_button.text = "+"
+	add_directive_button.tooltip_text = "共通ライブラリにDIRECTIVEを追加"
+	add_directive_button.custom_minimum_size = Vector2(30, 0)
+	add_directive_button.disabled = _inactive
+	add_directive_button.pressed.connect(_on_add_directive_pressed)
+	header.add_child(add_directive_button)
 
 	if _inactive:
 		var no_unit := Label.new()
@@ -181,3 +190,9 @@ func _on_order_selected(index: int) -> void:
 	if _inactive or index < 0 or index >= _order_ids.size():
 		return
 	order_requested.emit(_data.squad_number, _order_ids[index])
+
+
+func _on_add_directive_pressed() -> void:
+	if _inactive or _data == null:
+		return
+	directive_creation_requested.emit(_data.squad_number)
