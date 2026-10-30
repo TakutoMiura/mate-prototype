@@ -9,6 +9,10 @@ Godotで開発する、小隊指揮型リアルタイム戦術ゲームのプロ
 
 プロジェクトをGodotで開き、実行してください。現時点ではゲーム実装前の仕様整理段階です。
 
+## Codex skills
+
+プロジェクト用skillsは `.agents/skills/` にあります。実装時は `$godot-implementation`、仕様に沿ったロジック確認は `$godot-logic-review`、計測を含む性能確認は `$godot-performance-review`、レビュー後の振る舞いを保った整理は `$godot-refactor` を使います。
+
 ## 仕様書
 
 `Documents/` にゲームデザイン、操作、小隊行動、移動、受け入れ条件をまとめています。読む順序と変更方針は [`Documents/DEVELOPMENT_WORKFLOW.md`](Documents/DEVELOPMENT_WORKFLOW.md) を参照してください。

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Godot Implementation"
+  short_description: "Implement this RTS from its agreed specifications"
