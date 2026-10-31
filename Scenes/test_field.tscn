@@ -5,4 +5,5 @@
 
 [node name="TestField" type="Node3D"]
 script = ExtResource("1_test_field")
+arm_counter_swing_ratio = 0.8
 equipment_catalog = ExtResource("2_catalog")

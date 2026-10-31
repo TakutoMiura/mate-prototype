@@ -21,6 +21,7 @@ const PELVIS_HEIGHT := 1.34
 @export_range(10.0, 40.0, 1.0) var leg_swing_degrees := 24.0
 @export_range(2.0, 18.0, 0.5) var pelvis_twist_degrees := 16.0
 @export_range(1.0, 1.8, 0.05) var torso_counter_ratio := 1.2
+@export_range(0.0, 0.8, 0.05) var arm_counter_swing_ratio := 0.45
 @export_range(0.0, 0.15, 0.005) var lateral_weight_shift := 0.07
 @export_range(0.0, 0.08, 0.002) var contact_dip := 0.035
 @export_range(0.0, 5.0, 0.25) var arm_inertia_degrees := 2.5
@@ -128,8 +129,8 @@ func _update_walking_pose() -> void:
 
 	# Equipment remains carried by its arm; only a small delayed inertial motion is applied.
 	var arm_lag := sin(phase - 0.55) * arm_inertia * blend
-	_left_arm.rotation.x = arm_lag
-	_right_arm.rotation.x = -arm_lag
+	_left_arm.rotation.x = right_pose.x * arm_counter_swing_ratio * blend + arm_lag
+	_right_arm.rotation.x = left_pose.x * arm_counter_swing_ratio * blend - arm_lag
 	_left_forearm.rotation.x = -deg_to_rad(default_elbow_bend_degrees) - arm_lag * 0.35
 	_right_forearm.rotation.x = -deg_to_rad(default_elbow_bend_degrees) + arm_lag * 0.35
 

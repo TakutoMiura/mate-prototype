@@ -34,6 +34,7 @@ const WAYPOINT_VISUAL_HEIGHT := 0.06
 
 @export_group("Walking Motion")
 @export_range(1.0, 1.8, 0.05) var torso_counter_ratio := 1.2
+@export_range(0.0, 0.8, 0.05) var arm_counter_swing_ratio := 0.45
 
 @export var equipment_catalog: EquipmentCatalog
 
@@ -666,6 +667,7 @@ func _build_sample_mates() -> void:
 				MatePreview.ModelStyle.WAW_BLOCK_FRAME if squad_index == 1 else MatePreview.ModelStyle.SKELETON
 			)
 			mate.torso_counter_ratio = torso_counter_ratio
+			mate.arm_counter_swing_ratio = arm_counter_swing_ratio
 			mate.position = Vector3(
 				squad_center.x + (mate_index - 1) * MATE_SPACING,
 				0.04,
