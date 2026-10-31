@@ -20,7 +20,7 @@ const PELVIS_HEIGHT := 1.34
 @export_range(0.5, 0.8, 0.01) var stance_ratio := 0.62
 @export_range(10.0, 40.0, 1.0) var leg_swing_degrees := 24.0
 @export_range(2.0, 18.0, 0.5) var pelvis_twist_degrees := 16.0
-@export_range(1.0, 1.8, 0.05) var torso_counter_ratio := 1.6
+@export_range(1.0, 1.8, 0.05) var torso_counter_ratio := 1.2
 @export_range(0.0, 0.15, 0.005) var lateral_weight_shift := 0.07
 @export_range(0.0, 0.08, 0.002) var contact_dip := 0.035
 @export_range(0.0, 5.0, 0.25) var arm_inertia_degrees := 2.5
@@ -33,6 +33,7 @@ var _catalog: EquipmentCatalog
 var _model_style := ModelStyle.SKELETON
 var _status_bounds_corners: Array[Vector3] = []
 var _pelvis_rig: Node3D
+var _leg_support_rig: Node3D
 var _upper_body_rig: Node3D
 var _left_leg: Node3D
 var _right_leg: Node3D
@@ -121,6 +122,8 @@ func _update_walking_pose() -> void:
 		PELVIS_HEIGHT - _contact_compression(phase) * contact_dip * blend,
 		0.0
 	)
+	# Keep the legs aligned with their hip lanes; the waist can twist independently.
+	_leg_support_rig.position = _pelvis_rig.position
 	_pelvis_rig.rotation.z = -support_side * deg_to_rad(2.0) * blend
 
 	# Equipment remains carried by its arm; only a small delayed inertial motion is applied.
@@ -191,6 +194,10 @@ func _build_skeleton() -> void:
 	_pelvis_rig.name = "PelvisRig"
 	_pelvis_rig.position.y = PELVIS_HEIGHT
 	add_child(_pelvis_rig)
+	_leg_support_rig = Node3D.new()
+	_leg_support_rig.name = "LegSupportRig"
+	_leg_support_rig.position.y = PELVIS_HEIGHT
+	add_child(_leg_support_rig)
 	if _model_style == ModelStyle.SKELETON:
 		_add_bone(_pelvis_rig, "pelvis_bar", 0.58, Vector3(0, -0.02, 0), Vector3(0, 0, PI * 0.5))
 	else:
@@ -206,8 +213,8 @@ func _build_skeleton() -> void:
 	else:
 		_build_waw_torso()
 
-	_left_leg = _create_leg(_pelvis_rig, -1.0, "LeftLeg")
-	_right_leg = _create_leg(_pelvis_rig, 1.0, "RightLeg")
+	_left_leg = _create_leg(_leg_support_rig, -1.0, "LeftLeg")
+	_right_leg = _create_leg(_leg_support_rig, 1.0, "RightLeg")
 	_left_shin = _left_leg.get_node("LowerLeg") as Node3D
 	_right_shin = _right_leg.get_node("LowerLeg") as Node3D
 	_left_foot = _left_shin.get_node("FootRig") as Node3D

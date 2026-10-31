@@ -32,6 +32,9 @@ const WAYPOINT_VISUAL_HEIGHT := 0.06
 @export_range(0.5, 10.0, 0.1) var squad_move_speed := 2.5
 @export_range(15.0, 180.0, 1.0) var squad_turn_speed_degrees_per_second := 90.0
 
+@export_group("Walking Motion")
+@export_range(1.0, 1.8, 0.05) var torso_counter_ratio := 1.2
+
 @export var equipment_catalog: EquipmentCatalog
 
 var _camera: Camera3D
@@ -662,6 +665,7 @@ func _build_sample_mates() -> void:
 				SQUAD_COLORS[squad_index],
 				MatePreview.ModelStyle.WAW_BLOCK_FRAME if squad_index == 1 else MatePreview.ModelStyle.SKELETON
 			)
+			mate.torso_counter_ratio = torso_counter_ratio
 			mate.position = Vector3(
 				squad_center.x + (mate_index - 1) * MATE_SPACING,
 				0.04,
