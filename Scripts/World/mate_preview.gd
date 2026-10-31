@@ -44,6 +44,7 @@ var _left_arm: Node3D
 var _right_arm: Node3D
 var _left_forearm: Node3D
 var _right_forearm: Node3D
+var _left_hand: Node3D
 var _walking := false
 var _walk_blend := 0.0
 var _gait_phase := 0.0
@@ -215,6 +216,7 @@ func _build_skeleton() -> void:
 	_right_arm = _create_arm(_upper_body_rig, 1.0, "RightArm")
 	_left_forearm = _left_arm.get_node("ForearmRig") as Node3D
 	_right_forearm = _right_arm.get_node("ForearmRig") as Node3D
+	_left_hand = _left_forearm.get_node("HandRig") as Node3D
 
 
 func _build_skeleton_torso() -> void:
@@ -290,12 +292,16 @@ func _create_arm(parent: Node3D, side: float, rig_name: String) -> Node3D:
 	forearm.position.y = -0.51
 	forearm.rotation.x = -deg_to_rad(default_elbow_bend_degrees)
 	shoulder.add_child(forearm)
+	var hand := Node3D.new()
+	hand.name = "HandRig"
+	hand.position.y = -0.45
+	forearm.add_child(hand)
 	if _model_style == ModelStyle.SKELETON:
 		_add_joint(shoulder, "ShoulderJoint", Vector3.ZERO, 0.15, _accent_color)
 		_add_bone(shoulder, "UpperArmBone", 0.49, Vector3(0, -0.25, 0))
 		_add_joint(shoulder, "ElbowJoint", Vector3(0, -0.51, 0), 0.11)
 		_add_bone(forearm, "ForearmBone", 0.45, Vector3(0, -0.225, 0))
-		_add_joint(forearm, "HandJoint", Vector3(0, -0.45, 0), 0.10, BONE_HIGHLIGHT)
+		_add_joint(hand, "HandJoint", Vector3.ZERO, 0.10, BONE_HIGHLIGHT)
 	else:
 		_add_joint(shoulder, "shoulder_axle", Vector3.ZERO, 0.14, _accent_color)
 		_add_box_to(shoulder, "upper_support_frame", Vector3(0.24, 0.48, 0.24), Vector3(0, -0.25, 0), FRAME_COLOR)
@@ -303,7 +309,7 @@ func _create_arm(parent: Node3D, side: float, rig_name: String) -> Node3D:
 		_add_box_to(shoulder, "upper_hydraulic_link_right", Vector3(0.065, 0.44, 0.08), Vector3(0.15, -0.25, -0.08), BONE_HIGHLIGHT)
 		_add_joint(shoulder, "elbow_axle", Vector3(0, -0.51, 0), 0.11, JOINT_COLOR)
 		_add_box_to(forearm, "forearm_support_frame", Vector3(0.28, 0.42, 0.28), Vector3(0, -0.23, 0.03), METAL_COLOR)
-		_add_box_to(forearm, "wrist_mount", Vector3(0.24, 0.15, 0.24), Vector3(0, -0.46, 0.02), JOINT_COLOR)
+		_add_box_to(hand, "wrist_mount", Vector3(0.24, 0.15, 0.24), Vector3.ZERO, JOINT_COLOR)
 		_add_box_to(forearm, "forearm_rail_left", Vector3(0.065, 0.38, 0.08), Vector3(-0.16, -0.23, -0.08), BONE_COLOR)
 		_add_box_to(forearm, "forearm_rail_right", Vector3(0.065, 0.38, 0.08), Vector3(0.16, -0.23, -0.08), BONE_COLOR)
 	return shoulder
@@ -337,9 +343,14 @@ func _add_joint(parent: Node3D, joint_name: String, local_position: Vector3, rad
 
 func _add_equipment(parts: Dictionary) -> void:
 	if parts["shield"] != null:
-		_add_box_to(_left_forearm, "shield_mount", Vector3(0.15, 0.18, 0.17), Vector3(-0.39, -0.37, 0.04), JOINT_COLOR)
-		_add_box_to(_left_forearm, "shield", Vector3(0.68, 0.90, 0.16), Vector3(-0.60, -0.13, 0.18), _accent_color.lightened(0.15))
-		_add_box_to(_left_forearm, "shield_marking", Vector3(0.45, 0.055, 0.025), Vector3(-0.60, -0.07, 0.274), METAL_COLOR)
+		# Cant the hand-held shield outward so its face is visible in a side view.
+		var shield_mount := Node3D.new()
+		shield_mount.name = "ShieldHandMount"
+		shield_mount.rotation.y = -PI * 0.5
+		_left_hand.add_child(shield_mount)
+		_add_box_to(shield_mount, "shield_grip", Vector3(0.12, 0.14, 0.18), Vector3(0, 0, 0.08), JOINT_COLOR)
+		_add_box_to(shield_mount, "shield", Vector3(0.42, 0.64, 0.10), Vector3(0, 0, 0.22), _accent_color.lightened(0.15))
+		_add_box_to(shield_mount, "shield_marking", Vector3(0.28, 0.035, 0.015), Vector3(0, 0.04, 0.278), METAL_COLOR)
 
 	if parts["main_arm"] != null:
 		_add_box_to(_right_forearm, "weapon_receiver", Vector3(0.22, 0.22, 0.42), Vector3(0.39, -0.51, 0.16), JOINT_COLOR)

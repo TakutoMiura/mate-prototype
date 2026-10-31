@@ -3,7 +3,6 @@ extends Node3D
 
 signal squad_selection_requested(squad_number: int)
 signal view_changed
-signal walking_comparison_changed(enabled: bool)
 
 const MATE_UNIT_STATE_SCRIPT := preload("res://Scripts/Data/mate_unit_state.gd")
 const SQUAD_COLORS := [Color("#D39B4C"), Color("#6A9AA9"), Color("#879C68")]
@@ -43,7 +42,6 @@ var _camera_elevation := 0.0
 var _camera_distance := 0.0
 var _follow_squad_number := 0
 var _selected_squad_number := 0
-var walking_comparison_enabled := true
 var _is_rotating := false
 var _continuous_rendering := false
 var _squad_centers: Array[Vector3] = []
@@ -231,17 +229,10 @@ func _set_waypoint_from_screen(screen_position: Vector2, append: bool) -> bool:
 	var ground_point: Variant = Plane(Vector3.UP, 0.0).intersects_ray(ray_origin, ray_direction)
 	if ground_point == null:
 		return false
-	var selected_index := _selected_squad_number - 1
-	var selected_point := get_squad_point(_selected_squad_number)
-	var targets: Array[int] = [selected_index]
-	if walking_comparison_enabled and selected_index < 2:
-		targets = [0, 1]
-	for target_index in targets:
-		var route: Array = _squad_waypoints[target_index]
-		if not append:
-			route.clear()
-		var translation := get_squad_point(target_index + 1) - selected_point
-		route.append(Vector3(ground_point.x + translation.x, 0.0, ground_point.z + translation.z))
+	var route: Array = _squad_waypoints[_selected_squad_number - 1]
+	if not append:
+		route.clear()
+	route.append(Vector3(ground_point.x, 0.0, ground_point.z))
 	_refresh_waypoint_visual()
 	_set_continuous_rendering(true)
 	return true
@@ -437,10 +428,6 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	elif Input.is_action_just_pressed("select_squad_3"):
 		squad_selection_requested.emit(3)
 		get_viewport().set_input_as_handled()
-	if Input.is_action_just_pressed("toggle_walking_comparison"):
-		walking_comparison_enabled = not walking_comparison_enabled
-		walking_comparison_changed.emit(walking_comparison_enabled)
-		get_viewport().set_input_as_handled()
 	if Input.is_action_just_pressed("camera_focus_selected"):
 		if _selected_squad_number > 0:
 			follow_squad(_selected_squad_number)
@@ -526,7 +513,6 @@ func _register_camera_actions() -> void:
 	_register_key_action("camera_pan_right", KEY_D)
 	_register_key_action("camera_focus_selected", KEY_F)
 	_register_key_action("camera_reset", KEY_HOME)
-	_register_key_action("toggle_walking_comparison", KEY_C)
 	_register_key_action("select_squad_1", KEY_1)
 	_register_key_action("select_squad_2", KEY_2)
 	_register_key_action("select_squad_3", KEY_3)
