@@ -33,8 +33,12 @@ const WAYPOINT_VISUAL_HEIGHT := 0.06
 @export_range(15.0, 180.0, 1.0) var squad_turn_speed_degrees_per_second := 90.0
 
 @export_group("Walking Motion")
+@export_range(0.8, 3.0, 0.1) var walking_stride_length := 3.0
+@export_range(10.0, 40.0, 1.0) var leg_swing_degrees := 32.0
+@export_range(0.0, 10.0, 0.5) var walking_forward_lean_degrees := 10.0
 @export_range(1.0, 1.8, 0.05) var torso_counter_ratio := 1.2
 @export_range(0.0, 0.8, 0.05) var arm_counter_swing_ratio := 0.45
+@export_range(0.0, 0.16, 0.01) var foot_contact_pause_seconds := 0.06
 
 @export var equipment_catalog: EquipmentCatalog
 
@@ -666,8 +670,12 @@ func _build_sample_mates() -> void:
 				SQUAD_COLORS[squad_index],
 				MatePreview.ModelStyle.WAW_BLOCK_FRAME if squad_index == 1 else MatePreview.ModelStyle.SKELETON
 			)
+			mate.walking_stride_length = walking_stride_length
+			mate.leg_swing_degrees = leg_swing_degrees
+			mate.walking_forward_lean_degrees = walking_forward_lean_degrees
 			mate.torso_counter_ratio = torso_counter_ratio
 			mate.arm_counter_swing_ratio = arm_counter_swing_ratio
+			mate.foot_contact_pause_seconds = foot_contact_pause_seconds
 			mate.position = Vector3(
 				squad_center.x + (mate_index - 1) * MATE_SPACING,
 				0.04,

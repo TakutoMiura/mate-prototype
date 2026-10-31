@@ -16,12 +16,14 @@ const PELVIS_HEIGHT := 1.34
 @export_range(0.0, 60.0, 1.0) var default_elbow_bend_degrees := 45.0
 @export_range(0.0, 15.0, 1.0) var default_thigh_forward_degrees := 8.0
 @export_range(0.0, 40.0, 1.0) var default_knee_bend_degrees := 30.0
-@export_range(0.8, 3.0, 0.1) var walking_stride_length := 1.8
+@export_range(0.8, 3.0, 0.1) var walking_stride_length := 3.0
 @export_range(0.5, 0.8, 0.01) var stance_ratio := 0.62
-@export_range(10.0, 40.0, 1.0) var leg_swing_degrees := 24.0
+@export_range(10.0, 40.0, 1.0) var leg_swing_degrees := 32.0
+@export_range(0.0, 10.0, 0.5) var walking_forward_lean_degrees := 10.0
 @export_range(2.0, 18.0, 0.5) var pelvis_twist_degrees := 16.0
 @export_range(1.0, 1.8, 0.05) var torso_counter_ratio := 1.2
 @export_range(0.0, 0.8, 0.05) var arm_counter_swing_ratio := 0.45
+@export_range(0.0, 0.16, 0.01) var foot_contact_pause_seconds := 0.06
 @export_range(0.0, 0.15, 0.005) var lateral_weight_shift := 0.07
 @export_range(0.0, 0.08, 0.002) var contact_dip := 0.035
 @export_range(0.0, 5.0, 0.25) var arm_inertia_degrees := 2.5
@@ -51,6 +53,7 @@ var _walking := false
 var _walk_blend := 0.0
 var _gait_phase := 0.0
 var _gait_rate := 0.0
+var _foot_contact_pause_remaining := 0.0
 
 
 func configure(
@@ -87,9 +90,24 @@ func _process(delta: float) -> void:
 	if _pelvis_rig == null:
 		return
 	if _walking:
-		_gait_phase = fposmod(_gait_phase + delta * _gait_rate, TAU)
+		if _foot_contact_pause_remaining > 0.0:
+			_foot_contact_pause_remaining = maxf(0.0, _foot_contact_pause_remaining - delta)
+		else:
+			_advance_gait_phase(delta)
+	else:
+		_foot_contact_pause_remaining = 0.0
 	_walk_blend = move_toward(_walk_blend, 1.0 if _walking else 0.0, delta * stop_blend_speed)
 	_update_walking_pose()
+
+
+func _advance_gait_phase(delta: float) -> void:
+	var phase_advance := delta * _gait_rate
+	var next_contact_phase := float(floori(_gait_phase / PI) + 1) * PI
+	if phase_advance > 0.0 and _gait_phase + phase_advance >= next_contact_phase:
+		_gait_phase = fposmod(next_contact_phase, TAU)
+		_foot_contact_pause_remaining = foot_contact_pause_seconds
+		return
+	_gait_phase = fposmod(_gait_phase + phase_advance, TAU)
 
 
 func _update_walking_pose() -> void:
@@ -117,6 +135,7 @@ func _update_walking_pose() -> void:
 	var pelvis_yaw := -counter_signal * pelvis_twist
 	_pelvis_rig.rotation.y = pelvis_yaw * blend
 	_upper_body_rig.rotation.y = -pelvis_yaw * (1.0 + torso_counter_ratio) * blend
+	_upper_body_rig.rotation.x = deg_to_rad(walking_forward_lean_degrees) * blend
 	var support_side := cos(phase)
 	_pelvis_rig.position = Vector3(
 		support_side * lateral_weight_shift * blend,
