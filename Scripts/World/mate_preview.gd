@@ -13,6 +13,9 @@ const JOINT_RADIUS := 0.13
 const PELVIS_HEIGHT := 1.34
 
 @export_group("Walking Motion")
+@export_range(0.0, 60.0, 1.0) var default_elbow_bend_degrees := 45.0
+@export_range(0.0, 15.0, 1.0) var default_thigh_forward_degrees := 8.0
+@export_range(0.0, 40.0, 1.0) var default_knee_bend_degrees := 30.0
 @export_range(0.8, 3.0, 0.1) var walking_stride_length := 1.8
 @export_range(0.5, 0.8, 0.01) var stance_ratio := 0.62
 @export_range(10.0, 40.0, 1.0) var leg_swing_degrees := 24.0
@@ -39,6 +42,8 @@ var _left_foot: Node3D
 var _right_foot: Node3D
 var _left_arm: Node3D
 var _right_arm: Node3D
+var _left_forearm: Node3D
+var _right_forearm: Node3D
 var _walking := false
 var _walk_blend := 0.0
 var _gait_phase := 0.0
@@ -92,12 +97,16 @@ func _update_walking_pose() -> void:
 	var arm_inertia := deg_to_rad(arm_inertia_degrees)
 	var right_pose := _leg_pose(phase, leg_swing)
 	var left_pose := _leg_pose(phase + PI, leg_swing)
-	_right_leg.rotation.x = right_pose.x * blend
-	_right_shin.rotation.x = right_pose.y * blend
-	_right_foot.rotation.x = right_pose.z * blend
-	_left_leg.rotation.x = left_pose.x * blend
-	_left_shin.rotation.x = left_pose.y * blend
-	_left_foot.rotation.x = left_pose.z * blend
+	# Lean the thigh forward and fold the shin back from the knee. The ankle
+	# cancels the combined pitch so the foot remains nearly level.
+	var knee_bend := deg_to_rad(default_knee_bend_degrees)
+	var thigh_forward := deg_to_rad(default_thigh_forward_degrees)
+	_right_leg.rotation.x = -thigh_forward + right_pose.x * blend
+	_right_shin.rotation.x = knee_bend + right_pose.y * blend
+	_right_foot.rotation.x = thigh_forward - knee_bend + right_pose.z * blend
+	_left_leg.rotation.x = -thigh_forward + left_pose.x * blend
+	_left_shin.rotation.x = knee_bend + left_pose.y * blend
+	_left_foot.rotation.x = thigh_forward - knee_bend + left_pose.z * blend
 
 	# UpperBodyRig is parented to PelvisRig. Cancel the inherited pelvis yaw first,
 	# then apply the requested counter rotation as a visible world-space angle.
@@ -117,6 +126,8 @@ func _update_walking_pose() -> void:
 	var arm_lag := sin(phase - 0.55) * arm_inertia * blend
 	_left_arm.rotation.x = arm_lag
 	_right_arm.rotation.x = -arm_lag
+	_left_forearm.rotation.x = -deg_to_rad(default_elbow_bend_degrees) - arm_lag * 0.35
+	_right_forearm.rotation.x = -deg_to_rad(default_elbow_bend_degrees) + arm_lag * 0.35
 
 
 func _leg_pose(phase: float, swing_angle: float) -> Vector3:
@@ -202,8 +213,8 @@ func _build_skeleton() -> void:
 	_right_foot = _right_shin.get_node("FootRig") as Node3D
 	_left_arm = _create_arm(_upper_body_rig, -1.0, "LeftArm")
 	_right_arm = _create_arm(_upper_body_rig, 1.0, "RightArm")
-	if _model_style == ModelStyle.WAW_BLOCK_FRAME:
-		_build_waw_arms()
+	_left_forearm = _left_arm.get_node("ForearmRig") as Node3D
+	_right_forearm = _right_arm.get_node("ForearmRig") as Node3D
 
 
 func _build_skeleton_torso() -> void:
@@ -229,17 +240,6 @@ func _build_waw_torso() -> void:
 	for side in [-1.0, 1.0]:
 		_add_box_to(_upper_body_rig, "shoulder_mount", Vector3(0.34, 0.40, 0.38), Vector3(side * 0.62, 0.83, 0), _accent_color.darkened(0.22))
 		_add_box_to(_upper_body_rig, "chest_side_guard", Vector3(0.16, 0.60, 0.42), Vector3(side * 0.53, 0.65, 0.24), FRAME_COLOR)
-
-
-func _build_waw_arms() -> void:
-	for arm in [_left_arm, _right_arm]:
-		_add_box_to(arm, "upper_support_frame", Vector3(0.24, 0.48, 0.24), Vector3(0, -0.25, 0), FRAME_COLOR)
-		_add_box_to(arm, "forearm_support_frame", Vector3(0.28, 0.42, 0.28), Vector3(0, -0.74, 0.03), METAL_COLOR)
-		_add_box_to(arm, "wrist_mount", Vector3(0.24, 0.15, 0.24), Vector3(0, -0.99, 0.02), JOINT_COLOR)
-		_add_joint(arm, "elbow_axle", Vector3(0, -0.51, 0), 0.11, JOINT_COLOR)
-		for side in [-1.0, 1.0]:
-			_add_box_to(arm, "upper_hydraulic_link", Vector3(0.065, 0.44, 0.08), Vector3(side * 0.15, -0.25, -0.08), BONE_HIGHLIGHT)
-			_add_box_to(arm, "forearm_rail", Vector3(0.065, 0.38, 0.08), Vector3(side * 0.16, -0.74, -0.08), BONE_COLOR)
 
 
 func _create_leg(parent: Node3D, side: float, rig_name: String) -> Node3D:
@@ -285,15 +285,27 @@ func _create_arm(parent: Node3D, side: float, rig_name: String) -> Node3D:
 	shoulder.name = rig_name
 	shoulder.position = Vector3(side * 0.52, 0.91, 0)
 	parent.add_child(shoulder)
+	var forearm := Node3D.new()
+	forearm.name = "ForearmRig"
+	forearm.position.y = -0.51
+	forearm.rotation.x = -deg_to_rad(default_elbow_bend_degrees)
+	shoulder.add_child(forearm)
 	if _model_style == ModelStyle.SKELETON:
 		_add_joint(shoulder, "ShoulderJoint", Vector3.ZERO, 0.15, _accent_color)
 		_add_bone(shoulder, "UpperArmBone", 0.49, Vector3(0, -0.25, 0))
 		_add_joint(shoulder, "ElbowJoint", Vector3(0, -0.51, 0), 0.11)
-		_add_bone(shoulder, "ForearmBone", 0.45, Vector3(0, -0.75, 0))
-		_add_joint(shoulder, "HandJoint", Vector3(0, -0.98, 0), 0.10, BONE_HIGHLIGHT)
+		_add_bone(forearm, "ForearmBone", 0.45, Vector3(0, -0.225, 0))
+		_add_joint(forearm, "HandJoint", Vector3(0, -0.45, 0), 0.10, BONE_HIGHLIGHT)
 	else:
 		_add_joint(shoulder, "shoulder_axle", Vector3.ZERO, 0.14, _accent_color)
-		_add_box_to(shoulder, "wrist_clamp", Vector3(0.22, 0.16, 0.24), Vector3(0, -0.98, 0.02), _accent_color)
+		_add_box_to(shoulder, "upper_support_frame", Vector3(0.24, 0.48, 0.24), Vector3(0, -0.25, 0), FRAME_COLOR)
+		_add_box_to(shoulder, "upper_hydraulic_link_left", Vector3(0.065, 0.44, 0.08), Vector3(-0.15, -0.25, -0.08), BONE_HIGHLIGHT)
+		_add_box_to(shoulder, "upper_hydraulic_link_right", Vector3(0.065, 0.44, 0.08), Vector3(0.15, -0.25, -0.08), BONE_HIGHLIGHT)
+		_add_joint(shoulder, "elbow_axle", Vector3(0, -0.51, 0), 0.11, JOINT_COLOR)
+		_add_box_to(forearm, "forearm_support_frame", Vector3(0.28, 0.42, 0.28), Vector3(0, -0.23, 0.03), METAL_COLOR)
+		_add_box_to(forearm, "wrist_mount", Vector3(0.24, 0.15, 0.24), Vector3(0, -0.46, 0.02), JOINT_COLOR)
+		_add_box_to(forearm, "forearm_rail_left", Vector3(0.065, 0.38, 0.08), Vector3(-0.16, -0.23, -0.08), BONE_COLOR)
+		_add_box_to(forearm, "forearm_rail_right", Vector3(0.065, 0.38, 0.08), Vector3(0.16, -0.23, -0.08), BONE_COLOR)
 	return shoulder
 
 
@@ -325,14 +337,14 @@ func _add_joint(parent: Node3D, joint_name: String, local_position: Vector3, rad
 
 func _add_equipment(parts: Dictionary) -> void:
 	if parts["shield"] != null:
-		_add_box_to(_left_arm, "shield_mount", Vector3(0.15, 0.18, 0.17), Vector3(-0.39, -0.88, 0.04), JOINT_COLOR)
-		_add_box_to(_left_arm, "shield", Vector3(0.68, 0.90, 0.16), Vector3(-0.60, -0.64, 0.18), _accent_color.lightened(0.15))
-		_add_box_to(_left_arm, "shield_marking", Vector3(0.45, 0.055, 0.025), Vector3(-0.60, -0.58, 0.274), METAL_COLOR)
+		_add_box_to(_left_forearm, "shield_mount", Vector3(0.15, 0.18, 0.17), Vector3(-0.39, -0.37, 0.04), JOINT_COLOR)
+		_add_box_to(_left_forearm, "shield", Vector3(0.68, 0.90, 0.16), Vector3(-0.60, -0.13, 0.18), _accent_color.lightened(0.15))
+		_add_box_to(_left_forearm, "shield_marking", Vector3(0.45, 0.055, 0.025), Vector3(-0.60, -0.07, 0.274), METAL_COLOR)
 
 	if parts["main_arm"] != null:
-		_add_box_to(_right_arm, "weapon_receiver", Vector3(0.22, 0.22, 0.42), Vector3(0.39, -1.02, 0.16), JOINT_COLOR)
-		_add_box_to(_right_arm, "weapon_barrel", Vector3(0.095, 0.095, 0.72), Vector3(0.39, -0.98, 0.69), METAL_COLOR)
-		_add_box_to(_right_arm, "weapon_stock", Vector3(0.13, 0.14, 0.28), Vector3(0.39, -1.01, -0.17), FRAME_COLOR)
+		_add_box_to(_right_forearm, "weapon_receiver", Vector3(0.22, 0.22, 0.42), Vector3(0.39, -0.51, 0.16), JOINT_COLOR)
+		_add_box_to(_right_forearm, "weapon_barrel", Vector3(0.095, 0.095, 0.72), Vector3(0.39, -0.47, 0.69), METAL_COLOR)
+		_add_box_to(_right_forearm, "weapon_stock", Vector3(0.13, 0.14, 0.28), Vector3(0.39, -0.50, -0.17), FRAME_COLOR)
 
 	if parts["expansion"] != null:
 		_add_box_to(_upper_body_rig, "expansion_pack", Vector3(0.31, 0.26, 0.24), Vector3(0.34, 0.69, -0.46), _accent_color)
