@@ -5,12 +5,41 @@ const FRAME_COLOR := Color("#303B40")
 const JOINT_COLOR := Color("#151C20")
 const VISOR_COLOR := Color("#9BCAD6")
 const METAL_COLOR := Color("#74848B")
+const BONE_COLOR := Color("#C9D0C8")
+const BONE_HIGHLIGHT := Color("#E4E5D9")
+const JOINT_RADIUS := 0.13
+const PELVIS_HEIGHT := 1.34
+
+@export_group("Walking Motion")
+@export_range(0.8, 3.0, 0.1) var walking_stride_length := 1.8
+@export_range(0.5, 0.8, 0.01) var stance_ratio := 0.62
+@export_range(10.0, 40.0, 1.0) var leg_swing_degrees := 24.0
+@export_range(2.0, 18.0, 0.5) var pelvis_twist_degrees := 8.0
+@export_range(1.0, 1.8, 0.05) var torso_counter_ratio := 1.3
+@export_range(0.0, 0.15, 0.005) var lateral_weight_shift := 0.07
+@export_range(0.0, 0.08, 0.002) var contact_dip := 0.035
+@export_range(0.0, 5.0, 0.25) var arm_inertia_degrees := 2.5
+@export_range(1.0, 12.0, 0.5) var stop_blend_speed := 5.0
 
 var _accent_color := Color("#D39B4C")
 var _unit_state: Resource
 var _loadout: MateLoadout
 var _catalog: EquipmentCatalog
 var _status_bounds_corners: Array[Vector3] = []
+var _pelvis_rig: Node3D
+var _upper_body_rig: Node3D
+var _left_leg: Node3D
+var _right_leg: Node3D
+var _left_shin: Node3D
+var _right_shin: Node3D
+var _left_foot: Node3D
+var _right_foot: Node3D
+var _left_arm: Node3D
+var _right_arm: Node3D
+var _walking := false
+var _walk_blend := 0.0
+var _gait_phase := 0.0
+var _gait_rate := 0.0
 
 
 func configure(unit_state: Resource, catalog: EquipmentCatalog, accent_color: Color) -> void:
@@ -26,6 +55,86 @@ func get_status_bounds_corners() -> Array[Vector3]:
 
 func is_alive() -> bool:
 	return _unit_state != null and float(_unit_state.get('current_hp')) > 0.0
+
+
+func set_walking(active: bool, forward_speed: float = 2.5) -> void:
+	_walking = active and is_alive() and forward_speed > 0.0
+	_gait_rate = TAU * forward_speed / maxf(walking_stride_length, 0.1)
+
+
+func is_walking_animating() -> bool:
+	return _walking or _walk_blend > 0.0
+
+
+func _process(delta: float) -> void:
+	if _pelvis_rig == null:
+		return
+	if _walking:
+		_gait_phase = fposmod(_gait_phase + delta * _gait_rate, TAU)
+	_walk_blend = move_toward(_walk_blend, 1.0 if _walking else 0.0, delta * stop_blend_speed)
+	_update_walking_pose()
+
+
+func _update_walking_pose() -> void:
+	var phase := _gait_phase
+	var blend := _walk_blend
+	var leg_swing := deg_to_rad(leg_swing_degrees)
+	var pelvis_twist := deg_to_rad(pelvis_twist_degrees)
+	var arm_inertia := deg_to_rad(arm_inertia_degrees)
+	var right_pose := _leg_pose(phase, leg_swing)
+	var left_pose := _leg_pose(phase + PI, leg_swing)
+	_right_leg.rotation.x = right_pose.x * blend
+	_right_shin.rotation.x = right_pose.y * blend
+	_right_foot.rotation.x = right_pose.z * blend
+	_left_leg.rotation.x = left_pose.x * blend
+	_left_shin.rotation.x = left_pose.y * blend
+	_left_foot.rotation.x = left_pose.z * blend
+
+	# The pelvis counters the leading leg; the chest then counters the pelvis.
+	var counter_signal := sin(phase)
+	var pelvis_yaw := -counter_signal * pelvis_twist
+	_pelvis_rig.rotation.y = pelvis_yaw * blend
+	_upper_body_rig.rotation.y = -pelvis_yaw * torso_counter_ratio * blend
+	var support_side := cos(phase)
+	_pelvis_rig.position = Vector3(
+		support_side * lateral_weight_shift * blend,
+		PELVIS_HEIGHT - _contact_compression(phase) * contact_dip * blend,
+		0.0
+	)
+	_pelvis_rig.rotation.z = -support_side * deg_to_rad(2.0) * blend
+
+	# Equipment remains carried by its arm; only a small delayed inertial motion is applied.
+	var arm_lag := sin(phase - 0.55) * arm_inertia * blend
+	_left_arm.rotation.x = arm_lag
+	_right_arm.rotation.x = -arm_lag
+
+
+func _leg_pose(phase: float, swing_angle: float) -> Vector3:
+	var cycle := fposmod(phase, TAU) / TAU
+	var stance := clampf(stance_ratio, 0.5, 0.8)
+	if cycle < stance:
+		var progress := cycle / stance
+		var eased := _smooth_unit(progress)
+		var hip_angle := lerpf(-swing_angle, swing_angle, eased)
+		var knee_push := smoothstep(0.68, 1.0, progress) * deg_to_rad(5.0)
+		return Vector3(hip_angle, -knee_push, knee_push * 0.4)
+	var swing_progress := (cycle - stance) / (1.0 - stance)
+	var swing_eased := _smooth_unit(swing_progress)
+	var lift := sin(swing_progress * PI)
+	var hip_angle := lerpf(swing_angle, -swing_angle, swing_eased)
+	var knee_flex := lift * deg_to_rad(34.0)
+	var ankle_lift := -lift * deg_to_rad(10.0)
+	return Vector3(hip_angle, knee_flex, ankle_lift)
+
+
+func _contact_compression(phase: float) -> float:
+	# A short compression at each alternating foot contact gives the body weight.
+	return pow(maxf(0.0, cos(phase * 2.0)), 4.0)
+
+
+func _smooth_unit(value: float) -> float:
+	var t := clampf(value, 0.0, 1.0)
+	return t * t * (3.0 - 2.0 * t)
 
 
 func _cache_status_bounds(has_back_unit: bool) -> void:
@@ -49,40 +158,113 @@ func _build_model() -> void:
 		push_warning("Test-field loadout contains incompatible equipment: %s" % _loadout.mate_id)
 	_cache_status_bounds(parts["back_unit"] != null)
 
-	_add_box("pelvis", Vector3(0.68, 0.32, 0.44), Vector3(0, 1.30, 0), FRAME_COLOR)
-	_add_box("torso", Vector3(0.90, 0.92, 0.54), Vector3(0, 1.91, 0), _accent_color.darkened(0.28))
-	_add_box("chest_plate", Vector3(0.62, 0.42, 0.10), Vector3(0, 2.02, 0.30), _accent_color)
-	_add_box("shoulder_left", Vector3(0.48, 0.34, 0.44), Vector3(-0.78, 2.27, 0), _accent_color)
-	_add_box("shoulder_right", Vector3(0.48, 0.34, 0.44), Vector3(0.78, 2.27, 0), _accent_color)
-	_add_box("head", Vector3(0.40, 0.40, 0.38), Vector3(0, 2.61, 0.03), METAL_COLOR)
-	_add_box("visor", Vector3(0.30, 0.11, 0.055), Vector3(0, 2.65, 0.23), VISOR_COLOR)
-	_add_box("neck", Vector3(0.22, 0.17, 0.22), Vector3(0, 2.40, 0), JOINT_COLOR)
-
-	for side in [-1.0, 1.0]:
-		_add_box("upper_leg", Vector3(0.29, 0.59, 0.33), Vector3(side * 0.25, 0.91, 0), FRAME_COLOR)
-		_add_cylinder("knee", 0.17, 0.12, Vector3(side * 0.25, 0.60, 0.02), JOINT_COLOR)
-		_add_box("lower_leg", Vector3(0.24, 0.48, 0.29), Vector3(side * 0.25, 0.34, 0), FRAME_COLOR)
-		_add_box("foot", Vector3(0.39, 0.15, 0.61), Vector3(side * 0.25, 0.075, 0.12), JOINT_COLOR)
-		_add_box("arm", Vector3(0.25, 0.69, 0.27), Vector3(side * 0.77, 1.83, 0.02), FRAME_COLOR)
-		_add_cylinder("elbow", 0.16, 0.12, Vector3(side * 0.77, 1.46, 0.03), JOINT_COLOR)
-		_add_box("forearm", Vector3(0.29, 0.42, 0.31), Vector3(side * 0.77, 1.21, 0.03), METAL_COLOR)
+	_build_skeleton()
 
 	_add_equipment(parts)
 
 
+func _build_skeleton() -> void:
+	# A deliberately exposed, high-contrast rig makes the gait readable at field scale.
+	_pelvis_rig = Node3D.new()
+	_pelvis_rig.name = "PelvisRig"
+	_pelvis_rig.position.y = PELVIS_HEIGHT
+	add_child(_pelvis_rig)
+	_add_bone(_pelvis_rig, "pelvis_bar", 0.58, Vector3(0, -0.02, 0), Vector3(0, 0, PI * 0.5))
+
+	_upper_body_rig = Node3D.new()
+	_upper_body_rig.name = "UpperBodyRig"
+	_upper_body_rig.position.y = 0.02
+	_pelvis_rig.add_child(_upper_body_rig)
+	_add_bone(_upper_body_rig, "spine", 0.78, Vector3(0, 0.45, 0))
+	_add_bone(_upper_body_rig, "shoulder_bar", 1.05, Vector3(0, 0.92, 0), Vector3(0, 0, PI * 0.5))
+	_add_joint(_upper_body_rig, "chest_joint", Vector3(0, 0.90, 0), 0.17)
+	_add_bone(_upper_body_rig, "neck", 0.23, Vector3(0, 1.05, 0))
+	_add_joint(_upper_body_rig, "head", Vector3(0, 1.27, 0), 0.22, BONE_HIGHLIGHT)
+
+	_left_leg = _create_leg(_pelvis_rig, -1.0, "LeftLeg")
+	_right_leg = _create_leg(_pelvis_rig, 1.0, "RightLeg")
+	_left_shin = _left_leg.get_node("LowerLeg") as Node3D
+	_right_shin = _right_leg.get_node("LowerLeg") as Node3D
+	_left_foot = _left_shin.get_node("FootRig") as Node3D
+	_right_foot = _right_shin.get_node("FootRig") as Node3D
+	_left_arm = _create_arm(_upper_body_rig, -1.0, "LeftArm")
+	_right_arm = _create_arm(_upper_body_rig, 1.0, "RightArm")
+
+
+func _create_leg(parent: Node3D, side: float, rig_name: String) -> Node3D:
+	var hip := Node3D.new()
+	hip.name = rig_name
+	hip.position = Vector3(side * 0.25, 0.0, 0)
+	parent.add_child(hip)
+	_add_joint(hip, "HipJoint", Vector3.ZERO, JOINT_RADIUS, _accent_color)
+	_add_bone(hip, "UpperLegBone", 0.61, Vector3(0, -0.31, 0))
+	_add_joint(hip, "KneeJoint", Vector3(0, -0.62, 0), JOINT_RADIUS)
+	var shin := Node3D.new()
+	shin.name = "LowerLeg"
+	shin.position = Vector3(0, -0.62, 0)
+	hip.add_child(shin)
+	_add_bone(shin, "LowerLegBone", 0.56, Vector3(0, -0.28, 0))
+	_add_joint(shin, "AnkleJoint", Vector3(0, -0.56, 0), 0.095)
+	var foot := Node3D.new()
+	foot.name = "FootRig"
+	foot.position = Vector3(0, -0.56, 0)
+	shin.add_child(foot)
+	_add_bone(foot, "FootBone", 0.32, Vector3(0, 0.0, 0.12), Vector3(PI * 0.5, 0, 0))
+	return hip
+
+
+func _create_arm(parent: Node3D, side: float, rig_name: String) -> Node3D:
+	var shoulder := Node3D.new()
+	shoulder.name = rig_name
+	shoulder.position = Vector3(side * 0.52, 0.91, 0)
+	parent.add_child(shoulder)
+	_add_joint(shoulder, "ShoulderJoint", Vector3.ZERO, 0.15, _accent_color)
+	_add_bone(shoulder, "UpperArmBone", 0.49, Vector3(0, -0.25, 0))
+	_add_joint(shoulder, "ElbowJoint", Vector3(0, -0.51, 0), 0.11)
+	_add_bone(shoulder, "ForearmBone", 0.45, Vector3(0, -0.75, 0))
+	_add_joint(shoulder, "HandJoint", Vector3(0, -0.98, 0), 0.10, BONE_HIGHLIGHT)
+	return shoulder
+
+
+func _add_bone(parent: Node3D, bone_name: String, length: float, local_position: Vector3, local_rotation := Vector3.ZERO) -> void:
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = 0.065
+	mesh.bottom_radius = 0.095
+	mesh.height = length
+	var bone := MeshInstance3D.new()
+	bone.name = bone_name
+	bone.mesh = mesh
+	bone.position = local_position
+	bone.rotation = local_rotation
+	bone.material_override = _make_material(BONE_COLOR)
+	parent.add_child(bone)
+
+
+func _add_joint(parent: Node3D, joint_name: String, local_position: Vector3, radius: float, color := BONE_HIGHLIGHT) -> void:
+	var mesh := SphereMesh.new()
+	mesh.radius = radius
+	mesh.height = radius * 2.0
+	var joint := MeshInstance3D.new()
+	joint.name = joint_name
+	joint.mesh = mesh
+	joint.position = local_position
+	joint.material_override = _make_material(color)
+	parent.add_child(joint)
+
+
 func _add_equipment(parts: Dictionary) -> void:
 	if parts["shield"] != null:
-		_add_box("shield_mount", Vector3(0.15, 0.18, 0.17), Vector3(-0.91, 1.37, 0.04), JOINT_COLOR)
-		_add_box("shield", Vector3(0.68, 0.90, 0.16), Vector3(-1.12, 1.63, 0.18), _accent_color.lightened(0.15))
-		_add_box("shield_marking", Vector3(0.45, 0.055, 0.025), Vector3(-1.12, 1.69, 0.274), METAL_COLOR)
+		_add_box_to(_left_arm, "shield_mount", Vector3(0.15, 0.18, 0.17), Vector3(-0.39, -0.88, 0.04), JOINT_COLOR)
+		_add_box_to(_left_arm, "shield", Vector3(0.68, 0.90, 0.16), Vector3(-0.60, -0.64, 0.18), _accent_color.lightened(0.15))
+		_add_box_to(_left_arm, "shield_marking", Vector3(0.45, 0.055, 0.025), Vector3(-0.60, -0.58, 0.274), METAL_COLOR)
 
 	if parts["main_arm"] != null:
-		_add_box("weapon_receiver", Vector3(0.22, 0.22, 0.42), Vector3(0.91, 1.25, 0.16), JOINT_COLOR)
-		_add_box("weapon_barrel", Vector3(0.095, 0.095, 0.72), Vector3(0.91, 1.29, 0.69), METAL_COLOR)
-		_add_box("weapon_stock", Vector3(0.13, 0.14, 0.28), Vector3(0.91, 1.26, -0.17), FRAME_COLOR)
+		_add_box_to(_right_arm, "weapon_receiver", Vector3(0.22, 0.22, 0.42), Vector3(0.39, -1.02, 0.16), JOINT_COLOR)
+		_add_box_to(_right_arm, "weapon_barrel", Vector3(0.095, 0.095, 0.72), Vector3(0.39, -0.98, 0.69), METAL_COLOR)
+		_add_box_to(_right_arm, "weapon_stock", Vector3(0.13, 0.14, 0.28), Vector3(0.39, -1.01, -0.17), FRAME_COLOR)
 
 	if parts["expansion"] != null:
-		_add_box("expansion_pack", Vector3(0.31, 0.26, 0.24), Vector3(0.34, 2.05, -0.46), _accent_color)
+		_add_box_to(_upper_body_rig, "expansion_pack", Vector3(0.31, 0.26, 0.24), Vector3(0.34, 0.69, -0.46), _accent_color)
 
 	if parts["back_unit"] != null:
 		_add_back_cannon()
@@ -90,34 +272,34 @@ func _add_equipment(parts: Dictionary) -> void:
 
 func _add_back_cannon() -> void:
 	# Static stowed silhouette; raising and aiming the cannon is future animation work.
-	_add_box("cannon_mount", Vector3(0.48, 0.72, 0.40), Vector3(-0.42, 1.98, -0.43), JOINT_COLOR)
-	_add_box("cannon_receiver", Vector3(0.40, 1.02, 0.38), Vector3(-0.42, 2.48, -0.55), FRAME_COLOR)
-	_add_box("cannon_color_panel", Vector3(0.28, 0.48, 0.04), Vector3(-0.42, 2.56, -0.34), _accent_color)
-	_add_cylinder("cannon_barrel", 0.14, 1.65, Vector3(-0.42, 2.98, -0.55), METAL_COLOR)
-	_add_cylinder("cannon_muzzle", 0.18, 0.16, Vector3(-0.42, 3.83, -0.55), JOINT_COLOR)
+	_add_box_to(_upper_body_rig, "cannon_mount", Vector3(0.48, 0.72, 0.40), Vector3(-0.42, 0.62, -0.43), JOINT_COLOR)
+	_add_box_to(_upper_body_rig, "cannon_receiver", Vector3(0.40, 1.02, 0.38), Vector3(-0.42, 1.12, -0.55), FRAME_COLOR)
+	_add_box_to(_upper_body_rig, "cannon_color_panel", Vector3(0.28, 0.48, 0.04), Vector3(-0.42, 1.20, -0.34), _accent_color)
+	_add_cylinder_to(_upper_body_rig, "cannon_barrel", 0.14, 1.65, Vector3(-0.42, 1.62, -0.55), METAL_COLOR)
+	_add_cylinder_to(_upper_body_rig, "cannon_muzzle", 0.18, 0.16, Vector3(-0.42, 2.47, -0.55), JOINT_COLOR)
 
 
-func _add_box(part_name: String, dimensions: Vector3, position: Vector3, color: Color) -> void:
+func _add_box_to(parent: Node3D, part_name: String, dimensions: Vector3, position: Vector3, color: Color) -> void:
 	var mesh := BoxMesh.new()
 	mesh.size = dimensions
-	_add_mesh(part_name, mesh, position, color)
+	_add_mesh_to(parent, part_name, mesh, position, color)
 
 
-func _add_cylinder(part_name: String, radius: float, height: float, position: Vector3, color: Color) -> void:
+func _add_cylinder_to(parent: Node3D, part_name: String, radius: float, height: float, position: Vector3, color: Color) -> void:
 	var mesh := CylinderMesh.new()
 	mesh.top_radius = radius
 	mesh.bottom_radius = radius
 	mesh.height = height
-	_add_mesh(part_name, mesh, position, color)
+	_add_mesh_to(parent, part_name, mesh, position, color)
 
 
-func _add_mesh(part_name: String, mesh: PrimitiveMesh, position: Vector3, color: Color) -> void:
+func _add_mesh_to(parent: Node3D, part_name: String, mesh: PrimitiveMesh, position: Vector3, color: Color) -> void:
 	var instance := MeshInstance3D.new()
 	instance.name = part_name
 	instance.mesh = mesh
 	instance.position = position
 	instance.material_override = _make_material(color)
-	add_child(instance)
+	parent.add_child(instance)
 
 
 func _make_material(color: Color) -> StandardMaterial3D:

@@ -243,6 +243,9 @@ func _process_squad_movement(delta: float) -> bool:
 	var any_positions_moved := false
 	var route_changed := false
 	for index in range(_squad_waypoints.size()):
+		for mate in _squad_mates[index]:
+			if mate != null:
+				mate.set_walking(false)
 		var route: Array = _squad_waypoints[index]
 		if route.is_empty():
 			continue
@@ -293,12 +296,18 @@ func _process_squad_movement(delta: float) -> bool:
 			var displacement := direction / distance * travel_distance
 			for mate in living_mates:
 				mate.position += displacement
+				mate.set_walking(true, squad_move_speed)
 			any_active = true
 			any_positions_moved = true
 			if travel_distance + WAYPOINT_ARRIVAL_RADIUS >= distance:
 				route.pop_front()
 				route_changed = true
 			break
+	for squad_mates in _squad_mates:
+		for mate in squad_mates:
+			if mate != null and mate.is_walking_animating():
+				any_active = true
+				break
 	if any_active:
 		view_changed.emit()
 	if route_changed or any_positions_moved:
