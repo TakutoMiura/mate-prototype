@@ -1,6 +1,8 @@
 class_name MatePreview
 extends Node3D
 
+enum ModelStyle { SKELETON, WAW_BLOCK_FRAME }
+
 const FRAME_COLOR := Color("#303B40")
 const JOINT_COLOR := Color("#151C20")
 const VISOR_COLOR := Color("#9BCAD6")
@@ -14,8 +16,8 @@ const PELVIS_HEIGHT := 1.34
 @export_range(0.8, 3.0, 0.1) var walking_stride_length := 1.8
 @export_range(0.5, 0.8, 0.01) var stance_ratio := 0.62
 @export_range(10.0, 40.0, 1.0) var leg_swing_degrees := 24.0
-@export_range(2.0, 18.0, 0.5) var pelvis_twist_degrees := 8.0
-@export_range(1.0, 1.8, 0.05) var torso_counter_ratio := 1.3
+@export_range(2.0, 18.0, 0.5) var pelvis_twist_degrees := 16.0
+@export_range(1.0, 1.8, 0.05) var torso_counter_ratio := 1.6
 @export_range(0.0, 0.15, 0.005) var lateral_weight_shift := 0.07
 @export_range(0.0, 0.08, 0.002) var contact_dip := 0.035
 @export_range(0.0, 5.0, 0.25) var arm_inertia_degrees := 2.5
@@ -25,6 +27,7 @@ var _accent_color := Color("#D39B4C")
 var _unit_state: Resource
 var _loadout: MateLoadout
 var _catalog: EquipmentCatalog
+var _model_style := ModelStyle.SKELETON
 var _status_bounds_corners: Array[Vector3] = []
 var _pelvis_rig: Node3D
 var _upper_body_rig: Node3D
@@ -42,11 +45,17 @@ var _gait_phase := 0.0
 var _gait_rate := 0.0
 
 
-func configure(unit_state: Resource, catalog: EquipmentCatalog, accent_color: Color) -> void:
+func configure(
+	unit_state: Resource,
+	catalog: EquipmentCatalog,
+	accent_color: Color,
+	model_style: ModelStyle = ModelStyle.SKELETON
+) -> void:
 	_unit_state = unit_state
 	_loadout = unit_state.get("loadout") as MateLoadout if unit_state != null else null
 	_catalog = catalog
 	_accent_color = accent_color
+	_model_style = model_style
 	_build_model()
 
 
@@ -90,11 +99,12 @@ func _update_walking_pose() -> void:
 	_left_shin.rotation.x = left_pose.y * blend
 	_left_foot.rotation.x = left_pose.z * blend
 
-	# The pelvis counters the leading leg; the chest then counters the pelvis.
+	# UpperBodyRig is parented to PelvisRig. Cancel the inherited pelvis yaw first,
+	# then apply the requested counter rotation as a visible world-space angle.
 	var counter_signal := sin(phase)
 	var pelvis_yaw := -counter_signal * pelvis_twist
 	_pelvis_rig.rotation.y = pelvis_yaw * blend
-	_upper_body_rig.rotation.y = -pelvis_yaw * torso_counter_ratio * blend
+	_upper_body_rig.rotation.y = -pelvis_yaw * (1.0 + torso_counter_ratio) * blend
 	var support_side := cos(phase)
 	_pelvis_rig.position = Vector3(
 		support_side * lateral_weight_shift * blend,
@@ -164,22 +174,25 @@ func _build_model() -> void:
 
 
 func _build_skeleton() -> void:
-	# A deliberately exposed, high-contrast rig makes the gait readable at field scale.
+	# Both silhouettes use this same articulated rig and gait controller.
 	_pelvis_rig = Node3D.new()
 	_pelvis_rig.name = "PelvisRig"
 	_pelvis_rig.position.y = PELVIS_HEIGHT
 	add_child(_pelvis_rig)
-	_add_bone(_pelvis_rig, "pelvis_bar", 0.58, Vector3(0, -0.02, 0), Vector3(0, 0, PI * 0.5))
+	if _model_style == ModelStyle.SKELETON:
+		_add_bone(_pelvis_rig, "pelvis_bar", 0.58, Vector3(0, -0.02, 0), Vector3(0, 0, PI * 0.5))
+	else:
+		_add_box_to(_pelvis_rig, "waist_housing", Vector3(0.62, 0.28, 0.46), Vector3(0, -0.02, 0), FRAME_COLOR)
+		_add_box_to(_pelvis_rig, "waist_front_plate", Vector3(0.48, 0.22, 0.12), Vector3(0, -0.02, 0.28), _accent_color.darkened(0.15))
 
 	_upper_body_rig = Node3D.new()
 	_upper_body_rig.name = "UpperBodyRig"
 	_upper_body_rig.position.y = 0.02
 	_pelvis_rig.add_child(_upper_body_rig)
-	_add_bone(_upper_body_rig, "spine", 0.78, Vector3(0, 0.45, 0))
-	_add_bone(_upper_body_rig, "shoulder_bar", 1.05, Vector3(0, 0.92, 0), Vector3(0, 0, PI * 0.5))
-	_add_joint(_upper_body_rig, "chest_joint", Vector3(0, 0.90, 0), 0.17)
-	_add_bone(_upper_body_rig, "neck", 0.23, Vector3(0, 1.05, 0))
-	_add_joint(_upper_body_rig, "head", Vector3(0, 1.27, 0), 0.22, BONE_HIGHLIGHT)
+	if _model_style == ModelStyle.SKELETON:
+		_build_skeleton_torso()
+	else:
+		_build_waw_torso()
 
 	_left_leg = _create_leg(_pelvis_rig, -1.0, "LeftLeg")
 	_right_leg = _create_leg(_pelvis_rig, 1.0, "RightLeg")
@@ -189,6 +202,44 @@ func _build_skeleton() -> void:
 	_right_foot = _right_shin.get_node("FootRig") as Node3D
 	_left_arm = _create_arm(_upper_body_rig, -1.0, "LeftArm")
 	_right_arm = _create_arm(_upper_body_rig, 1.0, "RightArm")
+	if _model_style == ModelStyle.WAW_BLOCK_FRAME:
+		_build_waw_arms()
+
+
+func _build_skeleton_torso() -> void:
+	# Preserve the existing first-squad skeleton silhouette.
+	_add_bone(_upper_body_rig, "spine", 0.78, Vector3(0, 0.45, 0))
+	_add_bone(_upper_body_rig, "shoulder_bar", 1.05, Vector3(0, 0.92, 0), Vector3(0, 0, PI * 0.5))
+	_add_joint(_upper_body_rig, "chest_joint", Vector3(0, 0.90, 0), 0.17)
+	_add_bone(_upper_body_rig, "neck", 0.23, Vector3(0, 1.05, 0))
+	_add_joint(_upper_body_rig, "head", Vector3(0, 1.27, 0), 0.22, BONE_HIGHLIGHT)
+
+
+func _build_waw_torso() -> void:
+	# Broad, forward-set chest and small head create a compact WAW-like silhouette.
+	_add_box_to(_upper_body_rig, "thorax_frame", Vector3(0.68, 0.78, 0.42), Vector3(0, 0.60, -0.02), FRAME_COLOR)
+	_add_box_to(_upper_body_rig, "chest_block", Vector3(0.94, 0.78, 0.56), Vector3(0, 0.70, 0.20), METAL_COLOR)
+	_add_box_to(_upper_body_rig, "projecting_chest_plate", Vector3(0.82, 0.56, 0.42), Vector3(0, 0.72, 0.59), _accent_color.darkened(0.12))
+	_add_box_to(_upper_body_rig, "chest_reinforcement", Vector3(0.68, 0.10, 0.08), Vector3(0, 0.45, 0.82), _accent_color)
+	_add_box_to(_upper_body_rig, "collar_frame", Vector3(0.54, 0.18, 0.38), Vector3(0, 1.05, 0.02), JOINT_COLOR)
+	_add_box_to(_upper_body_rig, "head_mount", Vector3(0.20, 0.22, 0.20), Vector3(0, 1.19, 0), FRAME_COLOR)
+	_add_box_to(_upper_body_rig, "small_head", Vector3(0.25, 0.22, 0.25), Vector3(0, 1.34, 0.07), METAL_COLOR)
+	_add_box_to(_upper_body_rig, "head_sensor", Vector3(0.14, 0.045, 0.025), Vector3(0, 1.35, 0.202), VISOR_COLOR)
+	_add_box_to(_upper_body_rig, "shoulder_bridge", Vector3(1.14, 0.18, 0.32), Vector3(0, 0.98, -0.04), FRAME_COLOR)
+	for side in [-1.0, 1.0]:
+		_add_box_to(_upper_body_rig, "shoulder_mount", Vector3(0.34, 0.40, 0.38), Vector3(side * 0.62, 0.83, 0), _accent_color.darkened(0.22))
+		_add_box_to(_upper_body_rig, "chest_side_guard", Vector3(0.16, 0.60, 0.42), Vector3(side * 0.53, 0.65, 0.24), FRAME_COLOR)
+
+
+func _build_waw_arms() -> void:
+	for arm in [_left_arm, _right_arm]:
+		_add_box_to(arm, "upper_support_frame", Vector3(0.24, 0.48, 0.24), Vector3(0, -0.25, 0), FRAME_COLOR)
+		_add_box_to(arm, "forearm_support_frame", Vector3(0.28, 0.42, 0.28), Vector3(0, -0.74, 0.03), METAL_COLOR)
+		_add_box_to(arm, "wrist_mount", Vector3(0.24, 0.15, 0.24), Vector3(0, -0.99, 0.02), JOINT_COLOR)
+		_add_joint(arm, "elbow_axle", Vector3(0, -0.51, 0), 0.11, JOINT_COLOR)
+		for side in [-1.0, 1.0]:
+			_add_box_to(arm, "upper_hydraulic_link", Vector3(0.065, 0.44, 0.08), Vector3(side * 0.15, -0.25, -0.08), BONE_HIGHLIGHT)
+			_add_box_to(arm, "forearm_rail", Vector3(0.065, 0.38, 0.08), Vector3(side * 0.16, -0.74, -0.08), BONE_COLOR)
 
 
 func _create_leg(parent: Node3D, side: float, rig_name: String) -> Node3D:
@@ -196,20 +247,36 @@ func _create_leg(parent: Node3D, side: float, rig_name: String) -> Node3D:
 	hip.name = rig_name
 	hip.position = Vector3(side * 0.25, 0.0, 0)
 	parent.add_child(hip)
-	_add_joint(hip, "HipJoint", Vector3.ZERO, JOINT_RADIUS, _accent_color)
-	_add_bone(hip, "UpperLegBone", 0.61, Vector3(0, -0.31, 0))
-	_add_joint(hip, "KneeJoint", Vector3(0, -0.62, 0), JOINT_RADIUS)
+	if _model_style == ModelStyle.SKELETON:
+		_add_joint(hip, "HipJoint", Vector3.ZERO, JOINT_RADIUS, _accent_color)
+		_add_bone(hip, "UpperLegBone", 0.61, Vector3(0, -0.31, 0))
+		_add_joint(hip, "KneeJoint", Vector3(0, -0.62, 0), JOINT_RADIUS)
+	else:
+		_add_box_to(hip, "hip_socket", Vector3(0.30, 0.22, 0.32), Vector3(0, -0.04, 0), FRAME_COLOR)
+		_add_box_to(hip, "thigh_strut", Vector3(0.22, 0.54, 0.26), Vector3(0, -0.32, 0.02), METAL_COLOR)
+		_add_box_to(hip, "knee_housing", Vector3(0.32, 0.18, 0.32), Vector3(0, -0.62, 0.02), _accent_color.darkened(0.10))
+		for rail_side in [-1.0, 1.0]:
+			_add_box_to(hip, "thigh_guide", Vector3(0.07, 0.48, 0.09), Vector3(rail_side * 0.15, -0.31, 0.12), BONE_HIGHLIGHT)
 	var shin := Node3D.new()
 	shin.name = "LowerLeg"
 	shin.position = Vector3(0, -0.62, 0)
 	hip.add_child(shin)
-	_add_bone(shin, "LowerLegBone", 0.56, Vector3(0, -0.28, 0))
-	_add_joint(shin, "AnkleJoint", Vector3(0, -0.56, 0), 0.095)
+	if _model_style == ModelStyle.SKELETON:
+		_add_bone(shin, "LowerLegBone", 0.56, Vector3(0, -0.28, 0))
+		_add_joint(shin, "AnkleJoint", Vector3(0, -0.56, 0), 0.095)
+	else:
+		_add_box_to(shin, "shin_strut", Vector3(0.20, 0.50, 0.22), Vector3(0, -0.28, 0), METAL_COLOR)
+		_add_box_to(shin, "ankle_housing", Vector3(0.26, 0.14, 0.26), Vector3(0, -0.55, 0), FRAME_COLOR)
+		for rail_side in [-1.0, 1.0]:
+			_add_box_to(shin, "shin_guide", Vector3(0.065, 0.46, 0.08), Vector3(rail_side * 0.13, -0.28, 0.11), BONE_HIGHLIGHT)
 	var foot := Node3D.new()
 	foot.name = "FootRig"
 	foot.position = Vector3(0, -0.56, 0)
 	shin.add_child(foot)
-	_add_bone(foot, "FootBone", 0.32, Vector3(0, 0.0, 0.12), Vector3(PI * 0.5, 0, 0))
+	if _model_style == ModelStyle.SKELETON:
+		_add_bone(foot, "FootBone", 0.32, Vector3(0, 0.0, 0.12), Vector3(PI * 0.5, 0, 0))
+	else:
+		_add_box_to(foot, "foot_plate", Vector3(0.42, 0.12, 0.55), Vector3(0, 0, 0.16), FRAME_COLOR)
 	return hip
 
 
@@ -218,11 +285,15 @@ func _create_arm(parent: Node3D, side: float, rig_name: String) -> Node3D:
 	shoulder.name = rig_name
 	shoulder.position = Vector3(side * 0.52, 0.91, 0)
 	parent.add_child(shoulder)
-	_add_joint(shoulder, "ShoulderJoint", Vector3.ZERO, 0.15, _accent_color)
-	_add_bone(shoulder, "UpperArmBone", 0.49, Vector3(0, -0.25, 0))
-	_add_joint(shoulder, "ElbowJoint", Vector3(0, -0.51, 0), 0.11)
-	_add_bone(shoulder, "ForearmBone", 0.45, Vector3(0, -0.75, 0))
-	_add_joint(shoulder, "HandJoint", Vector3(0, -0.98, 0), 0.10, BONE_HIGHLIGHT)
+	if _model_style == ModelStyle.SKELETON:
+		_add_joint(shoulder, "ShoulderJoint", Vector3.ZERO, 0.15, _accent_color)
+		_add_bone(shoulder, "UpperArmBone", 0.49, Vector3(0, -0.25, 0))
+		_add_joint(shoulder, "ElbowJoint", Vector3(0, -0.51, 0), 0.11)
+		_add_bone(shoulder, "ForearmBone", 0.45, Vector3(0, -0.75, 0))
+		_add_joint(shoulder, "HandJoint", Vector3(0, -0.98, 0), 0.10, BONE_HIGHLIGHT)
+	else:
+		_add_joint(shoulder, "shoulder_axle", Vector3.ZERO, 0.14, _accent_color)
+		_add_box_to(shoulder, "wrist_clamp", Vector3(0.22, 0.16, 0.24), Vector3(0, -0.98, 0.02), _accent_color)
 	return shoulder
 
 

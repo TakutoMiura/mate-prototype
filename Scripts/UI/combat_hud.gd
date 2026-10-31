@@ -125,6 +125,7 @@ func _build_layout() -> void:
 	viewport_container.add_child(viewport)
 	_test_field = TEST_FIELD_SCENE.instantiate() as TestField
 	_test_field.squad_selection_requested.connect(_on_squad_selected)
+	_test_field.walking_comparison_changed.connect(_on_walking_comparison_changed)
 	viewport.add_child(_test_field)
 	_test_field.prepare()
 	_unit_status_overlay = UNIT_STATUS_OVERLAY_SCRIPT.new() as UnitStatusOverlay
@@ -132,9 +133,9 @@ func _build_layout() -> void:
 	_unit_status_overlay.configure(_test_field)
 
 	_camera_status_label = Label.new()
-	_camera_status_label.text = "TEST FIELD  /  9 SAMPLE MATE"
+	_camera_status_label.text = "TEST FIELD  /  FOCUS --  /  WALK COMPARE ON [C]"
 	_camera_status_label.position = Vector2(8, 6)
-	_camera_status_label.size = Vector2(250, 22)
+	_camera_status_label.size = Vector2(390, 22)
 	_camera_status_label.add_theme_color_override("font_color", Color("#D7E0E3"))
 	_camera_status_label.add_theme_font_size_override("font_size", 11)
 	_camera_status_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -163,12 +164,24 @@ func _refresh_squad_panels() -> void:
 func _on_squad_selected(squad_number: int) -> void:
 	_selected_squad = squad_number
 	_refresh_squad_panels()
-	_camera_status_label.text = "CAMERA FOCUS  /  SQUAD %02d" % squad_number
+	_refresh_field_status()
 	if _test_field != null:
 		_test_field.focus_squad(squad_number)
 	if _unit_status_overlay != null and squad_number > 0 and squad_number <= _squads.size():
 		_unit_status_overlay.set_selected_squad(squad_number, _squads[squad_number - 1].members)
 	squad_focus_requested.emit(squad_number)
+
+
+func _on_walking_comparison_changed(enabled: bool) -> void:
+	_refresh_field_status()
+
+
+func _refresh_field_status() -> void:
+	if _camera_status_label == null:
+		return
+	var focus_text := "--" if _selected_squad <= 0 else "%02d" % _selected_squad
+	var compare_text := "ON" if _test_field == null or _test_field.walking_comparison_enabled else "OFF"
+	_camera_status_label.text = "TEST FIELD  /  FOCUS %s  /  WALK COMPARE %s [C]" % [focus_text, compare_text]
 
 
 func _on_order_requested(squad_number: int, order_id: String) -> void:
