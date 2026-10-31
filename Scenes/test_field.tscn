@@ -5,4 +5,7 @@
 
 [node name="TestField" type="Node3D"]
 script = ExtResource("1_test_field")
+walking_stride_length = 3.0
+walking_forward_lean_degrees = 10.0
+arm_counter_swing_ratio = 0.8
 equipment_catalog = ExtResource("2_catalog")

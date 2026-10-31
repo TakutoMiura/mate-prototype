@@ -3,6 +3,7 @@ extends Node3D
 
 signal squad_selection_requested(squad_number: int)
 signal view_changed
+signal tactical_pause_changed(is_paused: bool)
 
 const MATE_UNIT_STATE_SCRIPT := preload("res://Scripts/Data/mate_unit_state.gd")
 const SQUAD_COLORS := [Color("#D39B4C"), Color("#6A9AA9"), Color("#879C68")]
@@ -32,6 +33,14 @@ const WAYPOINT_VISUAL_HEIGHT := 0.06
 @export_range(0.5, 10.0, 0.1) var squad_move_speed := 2.5
 @export_range(15.0, 180.0, 1.0) var squad_turn_speed_degrees_per_second := 90.0
 
+@export_group("Walking Motion")
+@export_range(0.8, 3.0, 0.1) var walking_stride_length := 3.0
+@export_range(10.0, 40.0, 1.0) var leg_swing_degrees := 32.0
+@export_range(0.0, 10.0, 0.5) var walking_forward_lean_degrees := 10.0
+@export_range(1.0, 1.8, 0.05) var torso_counter_ratio := 1.2
+@export_range(0.0, 0.8, 0.05) var arm_counter_swing_ratio := 0.45
+@export_range(0.0, 0.16, 0.01) var foot_contact_pause_seconds := 0.06
+
 @export var equipment_catalog: EquipmentCatalog
 
 var _camera: Camera3D
@@ -47,6 +56,7 @@ var _continuous_rendering := false
 var _squad_centers: Array[Vector3] = []
 var _squad_states: Array[Array] = []
 var _squad_mates: Array[Array] = []
+var _simulation_root: Node3D
 var _squad_waypoints: Array[Array] = []
 var _squad_headings: Array[float] = []
 var _waypoint_visual: MeshInstance3D
@@ -58,6 +68,7 @@ var _prepared := false
 
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	_register_camera_actions()
 	prepare()
 
@@ -147,7 +158,9 @@ func _finish_camera_transition() -> void:
 
 
 func _process(delta: float) -> void:
-	var squads_active := _process_squad_movement(delta)
+	var squads_active := false
+	if not get_tree().paused:
+		squads_active = _process_squad_movement(delta)
 	var pan_input := Vector2(
 		float(Input.is_action_pressed("camera_pan_right")) - float(Input.is_action_pressed("camera_pan_left")),
 		float(Input.is_action_pressed("camera_pan_backward")) - float(Input.is_action_pressed("camera_pan_forward"))
@@ -243,6 +256,9 @@ func _process_squad_movement(delta: float) -> bool:
 	var any_positions_moved := false
 	var route_changed := false
 	for index in range(_squad_waypoints.size()):
+		for mate in _squad_mates[index]:
+			if mate != null:
+				mate.set_walking(false)
 		var route: Array = _squad_waypoints[index]
 		if route.is_empty():
 			continue
@@ -293,12 +309,18 @@ func _process_squad_movement(delta: float) -> bool:
 			var displacement := direction / distance * travel_distance
 			for mate in living_mates:
 				mate.position += displacement
+				mate.set_walking(true, squad_move_speed)
 			any_active = true
 			any_positions_moved = true
 			if travel_distance + WAYPOINT_ARRIVAL_RADIUS >= distance:
 				route.pop_front()
 				route_changed = true
 			break
+	for squad_mates in _squad_mates:
+		for mate in squad_mates:
+			if mate != null and mate.is_walking_animating():
+				any_active = true
+				break
 	if any_active:
 		view_changed.emit()
 	if route_changed or any_positions_moved:
@@ -410,7 +432,13 @@ func _refresh_waypoint_origin_visual() -> void:
 func _unhandled_key_input(event: InputEvent) -> void:
 	if not event is InputEventKey or not event.pressed or event.echo:
 		return
-	if Input.is_action_just_pressed("select_squad_1"):
+	if Input.is_action_just_pressed("toggle_tactical_pause"):
+		get_tree().paused = not get_tree().paused
+		tactical_pause_changed.emit(get_tree().paused)
+		_set_continuous_rendering(false)
+		_request_viewport_render()
+		get_viewport().set_input_as_handled()
+	elif Input.is_action_just_pressed("select_squad_1"):
 		squad_selection_requested.emit(1)
 		get_viewport().set_input_as_handled()
 	elif Input.is_action_just_pressed("select_squad_2"):
@@ -507,6 +535,7 @@ func _register_camera_actions() -> void:
 	_register_key_action("select_squad_1", KEY_1)
 	_register_key_action("select_squad_2", KEY_2)
 	_register_key_action("select_squad_3", KEY_3)
+	_register_key_action("toggle_tactical_pause", KEY_SPACE)
 
 
 func _register_key_action(action_name: StringName, key: Key) -> void:
@@ -624,6 +653,11 @@ func _build_camera() -> void:
 
 
 func _build_sample_mates() -> void:
+	# Place moving actors, enemies, and projectiles here so tree pause freezes them.
+	_simulation_root = Node3D.new()
+	_simulation_root.name = "SimulationRoot"
+	_simulation_root.process_mode = Node.PROCESS_MODE_PAUSABLE
+	add_child(_simulation_root)
 	if equipment_catalog == null:
 		push_error("Test field has no EquipmentCatalog resource.")
 		return
@@ -650,8 +684,15 @@ func _build_sample_mates() -> void:
 			mate.configure(
 				unit_state,
 				equipment_catalog,
-				SQUAD_COLORS[squad_index]
+				SQUAD_COLORS[squad_index],
+				MatePreview.ModelStyle.WAW_BLOCK_FRAME if squad_index == 1 else MatePreview.ModelStyle.SKELETON
 			)
+			mate.walking_stride_length = walking_stride_length
+			mate.leg_swing_degrees = leg_swing_degrees
+			mate.walking_forward_lean_degrees = walking_forward_lean_degrees
+			mate.torso_counter_ratio = torso_counter_ratio
+			mate.arm_counter_swing_ratio = arm_counter_swing_ratio
+			mate.foot_contact_pause_seconds = foot_contact_pause_seconds
 			mate.position = Vector3(
 				squad_center.x + (mate_index - 1) * MATE_SPACING,
 				0.04,
@@ -659,6 +700,6 @@ func _build_sample_mates() -> void:
 			)
 			squad_states.append(unit_state)
 			squad_mates.append(mate)
-			add_child(mate)
+			_simulation_root.add_child(mate)
 		_squad_states.append(squad_states)
 		_squad_mates.append(squad_mates)
