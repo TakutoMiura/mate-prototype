@@ -15,12 +15,14 @@ var _squads: Array[HudSquadData] = []
 var _selected_squad: int = 0
 var _squad_row: HBoxContainer
 var _camera_status_label: Label
+var _pause_status_panel: PanelContainer
 var _communication_panel: CommunicationPanel
 var _test_field: TestField
 var _unit_status_overlay: UnitStatusOverlay
 
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_build_layout()
 	if directive_library == null:
@@ -37,6 +39,7 @@ func _ready() -> void:
 		set_squads(empty_squads)
 	else:
 		_refresh_squad_panels()
+	_on_squad_selected(1)
 
 
 func set_squads(squads: Array[HudSquadData]) -> void:
@@ -125,6 +128,7 @@ func _build_layout() -> void:
 	viewport_container.add_child(viewport)
 	_test_field = TEST_FIELD_SCENE.instantiate() as TestField
 	_test_field.squad_selection_requested.connect(_on_squad_selected)
+	_test_field.tactical_pause_changed.connect(_on_tactical_pause_changed)
 	viewport.add_child(_test_field)
 	_test_field.prepare()
 	_unit_status_overlay = UNIT_STATUS_OVERLAY_SCRIPT.new() as UnitStatusOverlay
@@ -139,6 +143,24 @@ func _build_layout() -> void:
 	_camera_status_label.add_theme_font_size_override("font_size", 11)
 	_camera_status_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	viewport_overlay.add_child(_camera_status_label)
+
+	_pause_status_panel = PanelContainer.new()
+	_pause_status_panel.name = "TacticalPauseStatus"
+	_pause_status_panel.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_pause_status_panel.offset_left = -150
+	_pause_status_panel.offset_top = 34
+	_pause_status_panel.offset_right = 150
+	_pause_status_panel.offset_bottom = 66
+	_pause_status_panel.add_theme_stylebox_override("panel", _panel_style(Color("#263D46")))
+	_pause_status_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_pause_status_panel.visible = false
+	var pause_status_label := Label.new()
+	pause_status_label.text = "TACTICAL PAUSE  /  SPACE TO RESUME"
+	pause_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pause_status_label.add_theme_color_override("font_color", Color("#E4E5D9"))
+	pause_status_label.add_theme_font_size_override("font_size", 12)
+	_pause_status_panel.add_child(pause_status_label)
+	viewport_overlay.add_child(_pause_status_panel)
 
 	_communication_panel = CommunicationPanel.new()
 	layout.add_child(_communication_panel)
@@ -177,6 +199,11 @@ func _on_order_requested(squad_number: int, order_id: String) -> void:
 			squad.active_order_id = order_id
 			break
 	squad_order_change_requested.emit(squad_number, order_id)
+
+
+func _on_tactical_pause_changed(is_paused: bool) -> void:
+	if _pause_status_panel != null:
+		_pause_status_panel.visible = is_paused
 
 
 func _panel_style(color: Color) -> StyleBoxFlat:

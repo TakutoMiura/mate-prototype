@@ -3,6 +3,7 @@ extends Node3D
 
 signal squad_selection_requested(squad_number: int)
 signal view_changed
+signal tactical_pause_changed(is_paused: bool)
 
 const MATE_UNIT_STATE_SCRIPT := preload("res://Scripts/Data/mate_unit_state.gd")
 const SQUAD_COLORS := [Color("#D39B4C"), Color("#6A9AA9"), Color("#879C68")]
@@ -55,6 +56,7 @@ var _continuous_rendering := false
 var _squad_centers: Array[Vector3] = []
 var _squad_states: Array[Array] = []
 var _squad_mates: Array[Array] = []
+var _simulation_root: Node3D
 var _squad_waypoints: Array[Array] = []
 var _squad_headings: Array[float] = []
 var _waypoint_visual: MeshInstance3D
@@ -66,6 +68,7 @@ var _prepared := false
 
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	_register_camera_actions()
 	prepare()
 
@@ -155,7 +158,9 @@ func _finish_camera_transition() -> void:
 
 
 func _process(delta: float) -> void:
-	var squads_active := _process_squad_movement(delta)
+	var squads_active := false
+	if not get_tree().paused:
+		squads_active = _process_squad_movement(delta)
 	var pan_input := Vector2(
 		float(Input.is_action_pressed("camera_pan_right")) - float(Input.is_action_pressed("camera_pan_left")),
 		float(Input.is_action_pressed("camera_pan_backward")) - float(Input.is_action_pressed("camera_pan_forward"))
@@ -427,7 +432,13 @@ func _refresh_waypoint_origin_visual() -> void:
 func _unhandled_key_input(event: InputEvent) -> void:
 	if not event is InputEventKey or not event.pressed or event.echo:
 		return
-	if Input.is_action_just_pressed("select_squad_1"):
+	if Input.is_action_just_pressed("toggle_tactical_pause"):
+		get_tree().paused = not get_tree().paused
+		tactical_pause_changed.emit(get_tree().paused)
+		_set_continuous_rendering(false)
+		_request_viewport_render()
+		get_viewport().set_input_as_handled()
+	elif Input.is_action_just_pressed("select_squad_1"):
 		squad_selection_requested.emit(1)
 		get_viewport().set_input_as_handled()
 	elif Input.is_action_just_pressed("select_squad_2"):
@@ -524,6 +535,7 @@ func _register_camera_actions() -> void:
 	_register_key_action("select_squad_1", KEY_1)
 	_register_key_action("select_squad_2", KEY_2)
 	_register_key_action("select_squad_3", KEY_3)
+	_register_key_action("toggle_tactical_pause", KEY_SPACE)
 
 
 func _register_key_action(action_name: StringName, key: Key) -> void:
@@ -641,6 +653,11 @@ func _build_camera() -> void:
 
 
 func _build_sample_mates() -> void:
+	# Place moving actors, enemies, and projectiles here so tree pause freezes them.
+	_simulation_root = Node3D.new()
+	_simulation_root.name = "SimulationRoot"
+	_simulation_root.process_mode = Node.PROCESS_MODE_PAUSABLE
+	add_child(_simulation_root)
 	if equipment_catalog == null:
 		push_error("Test field has no EquipmentCatalog resource.")
 		return
@@ -683,6 +700,6 @@ func _build_sample_mates() -> void:
 			)
 			squad_states.append(unit_state)
 			squad_mates.append(mate)
-			add_child(mate)
+			_simulation_root.add_child(mate)
 		_squad_states.append(squad_states)
 		_squad_mates.append(squad_mates)
