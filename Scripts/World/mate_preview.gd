@@ -29,6 +29,24 @@ const PELVIS_HEIGHT := 1.34
 @export_range(0.0, 5.0, 0.25) var arm_inertia_degrees := 2.5
 @export_range(1.0, 12.0, 0.5) var stop_blend_speed := 5.0
 
+@export_group("Standing Turn")
+@export_range(1.0, 180.0, 1.0) var turn_max_yaw_speed_degrees := 90.0
+@export_range(0.0, 30.0, 0.5) var turn_start_angle_degrees := 3.0
+@export_range(0.0, 15.0, 0.5) var turn_finish_angle_degrees := 1.0
+@export_range(0.01, 1.0, 0.01) var foot_position_start_threshold := 0.28
+@export_range(0.0, 0.5, 0.01) var foot_position_finish_threshold := 0.12
+@export_range(1.0, 90.0, 1.0) var foot_yaw_start_threshold_degrees := 40.0
+@export_range(0.0, 45.0, 1.0) var foot_yaw_finish_threshold_degrees := 12.0
+@export_range(0.0, 0.25, 0.01) var foot_slide_max_distance := 0.05
+@export_range(0.1, 1.0, 0.05) var step_duration := 0.32
+@export_range(0.05, 0.5, 0.01) var step_lift_height := 0.20
+@export_range(0.0, 45.0, 1.0) var step_lookahead_angle_degrees := 0.0
+@export_range(0.1, 5.0, 0.1) var step_target_correction_speed := 1.0
+@export_range(0.1, 1.0, 0.05) var turn_speed_during_step_factor := 0.70
+@export_range(0.0, 0.5, 0.01) var step_cooldown := 0.08
+@export_range(0.0, 0.2, 0.01) var body_weight_shift_amount := 0.06
+@export var show_turn_debug := false
+
 var _accent_color := Color("#D39B4C")
 var _unit_state: Resource
 var _loadout: MateLoadout
@@ -54,6 +72,25 @@ var _walk_blend := 0.0
 var _gait_phase := 0.0
 var _gait_rate := 0.0
 var _foot_contact_pause_remaining := 0.0
+var _standing_turn_requested := false
+var _standing_turn_active := false
+var _turn_foot_positions: Array[Vector3] = [Vector3.ZERO, Vector3.ZERO]
+var _turn_foot_yaws: Array[float] = [0.0, 0.0]
+var _turn_foot_initial_offsets: Array[Vector3] = [Vector3.ZERO, Vector3.ZERO]
+var _turn_planted_positions: Array[Vector3] = [Vector3.ZERO, Vector3.ZERO]
+var _turn_step_index := -1
+var _turn_step_start := Vector3.ZERO
+var _turn_step_target := Vector3.ZERO
+var _turn_step_progress := 0.0
+var _turn_step_cooldown_remaining := 0.0
+var _turn_last_body_yaw := 0.0
+var _turn_rotation_direction := 0.0
+var _turn_debug_target_heading := 0.0
+var _turn_debug_yaw_speed := 0.0
+var _turn_debug_mesh: ImmediateMesh
+var _turn_debug_instance: MeshInstance3D
+var _turn_debug_material: StandardMaterial3D
+var _turn_debug_labels: Array[Label3D] = []
 
 
 func configure(
@@ -79,7 +116,32 @@ func is_alive() -> bool:
 
 func set_walking(active: bool, forward_speed: float = 2.5) -> void:
 	_walking = active and is_alive() and forward_speed > 0.0
+	if _walking:
+		_standing_turn_requested = false
 	_gait_rate = TAU * forward_speed / maxf(walking_stride_length, 0.1)
+
+
+func set_standing_turn(active: bool) -> void:
+	_standing_turn_requested = active and is_alive() and not _walking
+	if _standing_turn_requested and not _standing_turn_active:
+		_begin_standing_turn()
+
+
+func is_standing_turn_animating() -> bool:
+	return _standing_turn_active or _turn_step_index >= 0
+
+
+func is_stepping_foot() -> bool:
+	return _turn_step_index >= 0
+
+
+func get_standing_turn_speed_factor() -> float:
+	return turn_speed_during_step_factor if is_stepping_foot() else 1.0
+
+
+func set_turn_debug_values(target_heading: float, yaw_speed: float) -> void:
+	_turn_debug_target_heading = target_heading
+	_turn_debug_yaw_speed = yaw_speed
 
 
 func is_walking_animating() -> bool:
@@ -98,6 +160,235 @@ func _process(delta: float) -> void:
 		_foot_contact_pause_remaining = 0.0
 	_walk_blend = move_toward(_walk_blend, 1.0 if _walking else 0.0, delta * stop_blend_speed)
 	_update_walking_pose()
+	_process_standing_turn(delta)
+	_update_turn_debug()
+
+
+func _process_standing_turn(delta: float) -> void:
+	if _standing_turn_requested and not _standing_turn_active:
+		_begin_standing_turn()
+	if not _standing_turn_active:
+		return
+	_turn_step_cooldown_remaining = maxf(0.0, _turn_step_cooldown_remaining - delta)
+	if _turn_step_index >= 0:
+		var yaw_delta := wrapf(rotation.y - _turn_last_body_yaw, -PI, PI)
+		if not is_zero_approx(yaw_delta):
+			_turn_rotation_direction = signf(yaw_delta)
+		_turn_last_body_yaw = rotation.y
+		var predicted_yaw := rotation.y + deg_to_rad(step_lookahead_angle_degrees) * _turn_rotation_direction
+		var current_ideal := global_position + Basis(Vector3.UP, predicted_yaw) * _turn_foot_initial_offsets[_turn_step_index]
+		_turn_step_target = _turn_step_target.move_toward(current_ideal, step_target_correction_speed * delta)
+		_turn_step_progress = minf(1.0, _turn_step_progress + delta / maxf(step_duration, 0.01))
+		var eased := _smooth_unit(_turn_step_progress)
+		var foot_position := _turn_step_start.lerp(_turn_step_target, eased)
+		foot_position.y += sin(_turn_step_progress * PI) * step_lift_height
+		_turn_foot_positions[_turn_step_index] = foot_position
+		if _turn_step_progress >= 1.0:
+			_turn_foot_positions[_turn_step_index] = _turn_step_target
+			_turn_planted_positions[_turn_step_index] = _turn_step_target
+			_turn_foot_yaws[_turn_step_index] = rotation.y
+			_turn_step_index = -1
+			_turn_step_cooldown_remaining = step_cooldown
+	else:
+		_update_turn_foot_anchors(delta)
+	var step_side := 0.0
+	if _turn_step_index >= 0:
+		step_side = 1.0 if _turn_step_index == 0 else -1.0
+	_pelvis_rig.position.x = step_side * body_weight_shift_amount
+	_leg_support_rig.position.x = _pelvis_rig.position.x
+	_apply_turning_leg_pose()
+	if not _standing_turn_requested and _turn_step_index < 0 and _turn_step_cooldown_remaining <= 0.0:
+		_end_standing_turn()
+
+
+func _begin_standing_turn() -> void:
+	_standing_turn_active = true
+	_turn_step_index = -1
+	_turn_last_body_yaw = rotation.y
+	_turn_rotation_direction = 0.0
+	var feet: Array[Node3D] = [_left_foot, _right_foot]
+	for index in range(2):
+		var foot := feet[index]
+		_turn_foot_positions[index] = foot.global_position
+		_turn_planted_positions[index] = foot.global_position
+		_turn_foot_yaws[index] = foot.global_rotation.y
+		_turn_foot_initial_offsets[index] = global_transform.affine_inverse() * foot.global_position
+
+
+func _end_standing_turn() -> void:
+	_standing_turn_active = false
+	_turn_step_index = -1
+	for leg in [_left_leg, _right_leg]:
+		leg.rotation = Vector3.ZERO
+	for shin in [_left_shin, _right_shin]:
+		shin.position = Vector3(0.0, -0.62, 0.0)
+		shin.rotation = Vector3.ZERO
+	for foot in [_left_foot, _right_foot]:
+		foot.position = Vector3(0.0, -0.56, 0.0)
+		foot.rotation = Vector3.ZERO
+	for leg in [_left_leg, _right_leg]:
+		leg.scale = Vector3.ONE
+	for shin in [_left_shin, _right_shin]:
+		shin.scale = Vector3.ONE
+	_update_walking_pose()
+
+
+func _update_turn_foot_anchors(_delta: float) -> void:
+	var highest_score := 0.0
+	var step_candidate := -1
+	var ideal_positions: Array[Vector3] = []
+	var ideal_yaw := rotation.y
+	var yaw_delta := wrapf(rotation.y - _turn_last_body_yaw, -PI, PI)
+	if not is_zero_approx(yaw_delta):
+		_turn_rotation_direction = signf(yaw_delta)
+	_turn_last_body_yaw = rotation.y
+	var lookahead_yaw := deg_to_rad(step_lookahead_angle_degrees) * _turn_rotation_direction
+	var predicted_yaw := rotation.y + lookahead_yaw
+	var predicted_basis := Basis(Vector3.UP, predicted_yaw)
+	var position_limit := foot_position_start_threshold if _standing_turn_requested else foot_position_finish_threshold
+	var yaw_limit := deg_to_rad(foot_yaw_start_threshold_degrees) if _standing_turn_requested else deg_to_rad(foot_yaw_finish_threshold_degrees)
+	position_limit = maxf(position_limit, 0.001)
+	yaw_limit = maxf(yaw_limit, 0.001)
+	for index in range(2):
+		var initial_offset := _turn_foot_initial_offsets[index]
+		var ideal := global_position + predicted_basis * initial_offset
+		ideal_positions.append(ideal)
+		var planted_offset := ideal - _turn_planted_positions[index]
+		if planted_offset.length() > foot_slide_max_distance:
+			planted_offset = planted_offset.normalized() * foot_slide_max_distance
+		_turn_foot_positions[index] = _turn_planted_positions[index] + planted_offset
+		var position_error := _turn_foot_positions[index].distance_to(ideal)
+		var yaw_error := absf(wrapf(ideal_yaw - _turn_foot_yaws[index], -PI, PI))
+		var position_score := position_error / position_limit
+		var yaw_score := yaw_error / yaw_limit
+		var candidate_score := maxf(position_score, yaw_score)
+		var preferred_index := 1 if _turn_rotation_direction > 0.0 else 0
+		var tie_prefers_candidate := is_equal_approx(candidate_score, highest_score) and _turn_rotation_direction != 0.0 and index == preferred_index
+		if (position_error > position_limit or yaw_error > yaw_limit) and (candidate_score > highest_score or tie_prefers_candidate):
+			highest_score = candidate_score
+			step_candidate = index
+	if _turn_step_cooldown_remaining > 0.0 or step_candidate < 0:
+		return
+	_turn_step_index = step_candidate
+	_turn_step_start = _turn_foot_positions[step_candidate]
+	_turn_step_target = ideal_positions[step_candidate]
+	_turn_step_progress = 0.0
+	_turn_step_cooldown_remaining = step_cooldown
+
+
+func _apply_turning_leg_pose() -> void:
+	var legs: Array[Node3D] = [_left_leg, _right_leg]
+	var shins: Array[Node3D] = [_left_shin, _right_shin]
+	var feet: Array[Node3D] = [_left_foot, _right_foot]
+	for index in range(2):
+		var side := -1.0 if index == 0 else 1.0
+		var hip_world := _leg_support_rig.to_global(Vector3(side * 0.25, 0.0, 0.0))
+		var ankle_world := _turn_foot_positions[index]
+		var leg_direction := (ankle_world - hip_world).normalized()
+		var upper_length := 0.62
+		var lower_length := 0.56
+		var raw_distance := hip_world.distance_to(ankle_world)
+		var stretch_factor := maxf(1.0, raw_distance / (upper_length + lower_length))
+		upper_length *= stretch_factor
+		lower_length *= stretch_factor
+		var distance := clampf(raw_distance, 0.001, upper_length + lower_length - 0.001)
+		var along := (upper_length * upper_length - lower_length * lower_length + distance * distance) / (2.0 * distance)
+		var height := sqrt(maxf(0.0, upper_length * upper_length - along * along))
+		var forward := global_basis.z.normalized()
+		var bend_direction := (forward - leg_direction * forward.dot(leg_direction)).normalized()
+		if bend_direction.length_squared() < 0.001:
+			bend_direction = Vector3.RIGHT
+		var knee_world := hip_world + leg_direction * along + bend_direction * height
+		legs[index].global_transform = Transform3D(Basis(Quaternion(Vector3.DOWN, (knee_world - hip_world).normalized())), hip_world)
+		legs[index].scale = Vector3(1.0, stretch_factor, 1.0)
+		shins[index].global_transform = Transform3D(Basis(Quaternion(Vector3.DOWN, (ankle_world - knee_world).normalized())), knee_world)
+		shins[index].scale = Vector3(1.0, stretch_factor, 1.0)
+		feet[index].global_transform = Transform3D(Basis(Vector3.UP, _turn_foot_yaws[index]), ankle_world)
+
+
+func _update_turn_debug() -> void:
+	if not show_turn_debug:
+		if _turn_debug_instance != null:
+			_turn_debug_instance.visible = false
+		for label in _turn_debug_labels:
+			label.visible = false
+		return
+	if _turn_debug_instance == null:
+		_turn_debug_mesh = ImmediateMesh.new()
+		_turn_debug_material = StandardMaterial3D.new()
+		_turn_debug_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_turn_debug_material.vertex_color_use_as_albedo = true
+		_turn_debug_instance = MeshInstance3D.new()
+		_turn_debug_instance.name = "StandingTurnDebug"
+		_turn_debug_instance.top_level = true
+		_turn_debug_instance.mesh = _turn_debug_mesh
+		_turn_debug_instance.material_override = _turn_debug_material
+		add_child(_turn_debug_instance)
+		for index in range(3):
+			var label := Label3D.new()
+			label.name = "StandingTurnDebugLabel%d" % index
+			label.top_level = true
+			label.font_size = 24
+			label.pixel_size = 0.004
+			label.outline_size = 5
+			label.no_depth_test = true
+			add_child(label)
+			_turn_debug_labels.append(label)
+	_turn_debug_instance.visible = true
+	_turn_debug_mesh.clear_surfaces()
+	_turn_debug_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
+	var center := global_position
+	_turn_debug_line(center + Vector3(0, 0.04, 0), center + Vector3(0, 0.55, 0), Color.GREEN)
+	var feet: Array[Node3D] = [_left_foot, _right_foot]
+	for index in range(2):
+		var actual := _turn_foot_positions[index] if _standing_turn_active else feet[index].global_position
+		var ideal := actual
+		if _standing_turn_active:
+			var predicted_yaw := rotation.y + deg_to_rad(step_lookahead_angle_degrees) * _turn_rotation_direction
+			ideal = global_position + Basis(Vector3.UP, predicted_yaw) * _turn_foot_initial_offsets[index]
+		var color := Color.ORANGE if index == _turn_step_index else Color.CYAN
+		_turn_debug_marker(actual, color)
+		_turn_debug_marker(ideal, Color.WHITE)
+		_turn_debug_line(actual, ideal, color)
+		var position_error := actual.distance_to(ideal)
+		var yaw_error := absf(wrapf(rotation.y - _turn_foot_yaws[index], -PI, PI)) if _standing_turn_active else 0.0
+		var foot_name := "LEFT" if index == 0 else "RIGHT"
+		_turn_debug_labels[index].text = "%s %s  pos %.2f/%.2f/%.2f  yaw %.0f/%.0f/%.0f" % [
+			foot_name,
+			"STEP" if index == _turn_step_index else "PLANT",
+			position_error,
+			foot_position_start_threshold,
+			foot_position_finish_threshold,
+			rad_to_deg(yaw_error),
+			foot_yaw_start_threshold_degrees,
+			foot_yaw_finish_threshold_degrees
+		]
+		_turn_debug_labels[index].global_position = actual + Vector3(0, 0.35, 0)
+		_turn_debug_labels[index].visible = true
+	_turn_debug_labels[2].text = "ROOT %s  yaw %.1f > %.1f  %.1f deg/s  C %.2f, %.2f" % [
+			"TURN" if _standing_turn_active else "IDLE",
+		rad_to_deg(rotation.y),
+		rad_to_deg(_turn_debug_target_heading),
+		_turn_debug_yaw_speed,
+		center.x,
+		center.z
+	]
+	_turn_debug_labels[2].global_position = center + Vector3(0, 2.5, 0)
+	_turn_debug_labels[2].visible = true
+	_turn_debug_mesh.surface_end()
+
+
+func _turn_debug_marker(position: Vector3, color: Color) -> void:
+	var size := 0.08
+	_turn_debug_line(position - Vector3(size, 0, 0), position + Vector3(size, 0, 0), color)
+	_turn_debug_line(position - Vector3(0, 0, size), position + Vector3(0, 0, size), color)
+	_turn_debug_line(position, position + Vector3(0, size * 2.0, 0), color)
+
+
+func _turn_debug_line(start: Vector3, finish: Vector3, color: Color) -> void:
+	_turn_debug_mesh.surface_set_color(color)
+	_turn_debug_mesh.surface_add_vertex(start)
+	_turn_debug_mesh.surface_add_vertex(finish)
 
 
 func _advance_gait_phase(delta: float) -> void:
