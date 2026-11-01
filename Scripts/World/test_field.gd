@@ -15,7 +15,6 @@ const CAMERA_INITIAL_TARGET := Vector3(0, 1.35, 0)
 const CAMERA_INITIAL_OFFSET := Vector3(0, 14.65, 29.0)
 const CAMERA_FOCUS_DISTANCE := 14.0
 const WAYPOINT_ARRIVAL_RADIUS := 0.5
-const HEADING_ALIGNMENT_TOLERANCE := deg_to_rad(5.0)
 const WAYPOINT_MARKER_RADIUS := 0.32
 const WAYPOINT_MARKER_SEGMENTS := 16
 const WAYPOINT_VISUAL_HEIGHT := 0.06
@@ -41,6 +40,24 @@ const WAYPOINT_VISUAL_HEIGHT := 0.06
 @export_range(0.0, 0.8, 0.05) var arm_counter_swing_ratio := 0.45
 @export_range(0.0, 0.16, 0.01) var foot_contact_pause_seconds := 0.06
 
+@export_group("Standing Turn")
+@export_range(1.0, 180.0, 1.0) var turn_max_yaw_speed_degrees := 90.0
+@export_range(0.0, 30.0, 0.5) var turn_start_angle_degrees := 3.0
+@export_range(0.0, 15.0, 0.5) var turn_finish_angle_degrees := 1.0
+@export_range(0.01, 1.0, 0.01) var foot_position_start_threshold := 0.28
+@export_range(0.0, 0.5, 0.01) var foot_position_finish_threshold := 0.12
+@export_range(1.0, 90.0, 1.0) var foot_yaw_start_threshold_degrees := 40.0
+@export_range(0.0, 45.0, 1.0) var foot_yaw_finish_threshold_degrees := 12.0
+@export_range(0.0, 0.25, 0.01) var foot_slide_max_distance := 0.05
+@export_range(0.1, 1.0, 0.05) var step_duration := 0.32
+@export_range(0.05, 0.5, 0.01) var step_lift_height := 0.20
+@export_range(0.0, 45.0, 1.0) var step_lookahead_angle_degrees := 0.0
+@export_range(0.1, 5.0, 0.1) var step_target_correction_speed := 1.0
+@export_range(0.1, 1.0, 0.05) var turn_speed_during_step_factor := 0.70
+@export_range(0.0, 0.5, 0.01) var step_cooldown := 0.08
+@export_range(0.0, 0.2, 0.01) var body_weight_shift_amount := 0.06
+@export var show_turn_debug := false
+
 @export var equipment_catalog: EquipmentCatalog
 
 var _camera: Camera3D
@@ -59,6 +76,7 @@ var _squad_mates: Array[Array] = []
 var _simulation_root: Node3D
 var _squad_waypoints: Array[Array] = []
 var _squad_headings: Array[float] = []
+var _squad_turning_active: Array[bool] = []
 var _waypoint_visual: MeshInstance3D
 var _waypoint_visual_mesh: ImmediateMesh
 var _waypoint_origin_visual: MeshInstance3D
@@ -259,6 +277,7 @@ func _process_squad_movement(delta: float) -> bool:
 		for mate in _squad_mates[index]:
 			if mate != null:
 				mate.set_walking(false)
+				mate.set_standing_turn(false)
 		var route: Array = _squad_waypoints[index]
 		if route.is_empty():
 			continue
@@ -284,25 +303,51 @@ func _process_squad_movement(delta: float) -> bool:
 			var target_heading := atan2(direction.x, direction.z)
 			var heading: float = _squad_headings[index]
 			var heading_difference := wrapf(target_heading - heading, -PI, PI)
-			if absf(heading_difference) > HEADING_ALIGNMENT_TOLERANCE:
-				var maximum_turn := deg_to_rad(squad_turn_speed_degrees_per_second) * delta
+			var turn_start_threshold := PI
+			var turn_finish_threshold := PI
+			for mate in living_mates:
+				turn_start_threshold = minf(turn_start_threshold, deg_to_rad(mate.turn_start_angle_degrees))
+				turn_finish_threshold = minf(turn_finish_threshold, deg_to_rad(mate.turn_finish_angle_degrees))
+			var animate_turn := _squad_turning_active[index] or absf(heading_difference) >= turn_start_threshold
+			if absf(heading_difference) > turn_finish_threshold:
+				_squad_turning_active[index] = animate_turn
+				var turn_speed := deg_to_rad(squad_turn_speed_degrees_per_second)
+				for mate in living_mates:
+					turn_speed = minf(
+						turn_speed,
+						deg_to_rad(mate.turn_max_yaw_speed_degrees) * mate.get_standing_turn_speed_factor()
+					)
+				var maximum_turn := turn_speed * delta
 				var turn_delta := clampf(heading_difference, -maximum_turn, maximum_turn)
 				heading = wrapf(heading + turn_delta, -PI, PI)
 				_squad_headings[index] = heading
 				for mate in living_mates:
+					mate.set_turn_debug_values(target_heading, rad_to_deg(turn_delta / maxf(delta, 0.001)))
+					mate.set_standing_turn(animate_turn)
 					mate.rotation.y = heading
 				any_active = true
 				heading_difference = wrapf(target_heading - heading, -PI, PI)
-				if absf(heading_difference) > HEADING_ALIGNMENT_TOLERANCE:
+				if absf(heading_difference) > turn_finish_threshold:
 					break
-			# Snap only the final sub-five-degree difference so forward movement
-			# points exactly at the waypoint rather than drifting sideways.
-			if not is_equal_approx(heading, target_heading):
-				heading = target_heading
-				_squad_headings[index] = heading
+			else:
+				_squad_turning_active[index] = false
 				for mate in living_mates:
-					mate.rotation.y = heading
+					mate.set_turn_debug_values(target_heading, 0.0)
+					mate.set_standing_turn(false)
+				if not is_equal_approx(heading, target_heading):
+					heading = target_heading
+					_squad_headings[index] = heading
+					for mate in living_mates:
+						mate.rotation.y = heading
+					any_active = true
+			var turn_animation_active := false
+			for mate in living_mates:
+				if mate.is_standing_turn_animating():
+					turn_animation_active = true
+					break
+			if turn_animation_active:
 				any_active = true
+				break
 			var travel_distance := minf(movement_budget, distance - WAYPOINT_ARRIVAL_RADIUS)
 			if travel_distance <= 0.0:
 				break
@@ -318,7 +363,7 @@ func _process_squad_movement(delta: float) -> bool:
 			break
 	for squad_mates in _squad_mates:
 		for mate in squad_mates:
-			if mate != null and mate.is_walking_animating():
+			if mate != null and (mate.is_walking_animating() or mate.is_standing_turn_animating()):
 				any_active = true
 				break
 	if any_active:
@@ -670,6 +715,7 @@ func _build_sample_mates() -> void:
 		var squad_waypoints: Array[Vector3] = []
 		_squad_waypoints.append(squad_waypoints)
 		_squad_headings.append(0.0)
+		_squad_turning_active.append(false)
 		var squad_states: Array[Resource] = []
 		var squad_mates: Array[MatePreview] = []
 		for mate_index in range(3):
@@ -693,6 +739,22 @@ func _build_sample_mates() -> void:
 			mate.torso_counter_ratio = torso_counter_ratio
 			mate.arm_counter_swing_ratio = arm_counter_swing_ratio
 			mate.foot_contact_pause_seconds = foot_contact_pause_seconds
+			mate.turn_max_yaw_speed_degrees = turn_max_yaw_speed_degrees
+			mate.turn_start_angle_degrees = turn_start_angle_degrees
+			mate.turn_finish_angle_degrees = turn_finish_angle_degrees
+			mate.foot_position_start_threshold = foot_position_start_threshold
+			mate.foot_position_finish_threshold = foot_position_finish_threshold
+			mate.foot_yaw_start_threshold_degrees = foot_yaw_start_threshold_degrees
+			mate.foot_yaw_finish_threshold_degrees = foot_yaw_finish_threshold_degrees
+			mate.foot_slide_max_distance = foot_slide_max_distance
+			mate.step_duration = step_duration
+			mate.step_lift_height = step_lift_height
+			mate.step_lookahead_angle_degrees = step_lookahead_angle_degrees
+			mate.step_target_correction_speed = step_target_correction_speed
+			mate.turn_speed_during_step_factor = turn_speed_during_step_factor
+			mate.step_cooldown = step_cooldown
+			mate.body_weight_shift_amount = body_weight_shift_amount
+			mate.show_turn_debug = show_turn_debug
 			mate.position = Vector3(
 				squad_center.x + (mate_index - 1) * MATE_SPACING,
 				0.04,
