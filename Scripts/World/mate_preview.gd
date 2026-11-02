@@ -47,6 +47,11 @@ const PELVIS_HEIGHT := 1.34
 @export_range(0.0, 0.2, 0.01) var body_weight_shift_amount := 0.06
 @export var show_turn_debug := false
 
+@export_group("Jump Motion")
+@export_range(0.0, 50.0, 1.0) var jump_crouch_knee_bend_degrees := 28.0
+@export_range(0.0, 50.0, 1.0) var jump_tuck_knee_bend_degrees := 22.0
+@export_range(0.0, 0.35, 0.01) var jump_crouch_pelvis_drop := 0.16
+
 var _accent_color := Color("#D39B4C")
 var _unit_state: Resource
 var _loadout: MateLoadout
@@ -91,6 +96,11 @@ var _turn_debug_mesh: ImmediateMesh
 var _turn_debug_instance: MeshInstance3D
 var _turn_debug_material: StandardMaterial3D
 var _turn_debug_labels: Array[Label3D] = []
+var _jump_jet_meshes: Array[MeshInstance3D] = []
+var _jump_jet_material: StandardMaterial3D
+var _jump_crouch_amount := 0.0
+var _jump_tuck_amount := 0.0
+var _jump_body_pitch_radians := 0.0
 
 
 func configure(
@@ -112,6 +122,35 @@ func get_status_bounds_corners() -> Array[Vector3]:
 
 func is_alive() -> bool:
 	return _unit_state != null and float(_unit_state.get('current_hp')) > 0.0
+
+
+func set_jump_jet_intensity(intensity: float) -> void:
+	if _jump_jet_meshes.is_empty():
+		_jump_jet_material = StandardMaterial3D.new()
+		_jump_jet_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_jump_jet_material.emission_enabled = true
+		_jump_jet_material.emission = Color("#FFB24A")
+		for side in [-1.0, 1.0]:
+			var jet := MeshInstance3D.new()
+			jet.name = "JumpBoosterFlash"
+			var mesh := SphereMesh.new()
+			mesh.radius = 0.12
+			mesh.height = 0.24
+			jet.mesh = mesh
+			jet.position = Vector3(side * 0.18, 1.35, -0.46)
+			jet.material_override = _jump_jet_material
+			add_child(jet)
+			_jump_jet_meshes.append(jet)
+	var visible_intensity := clampf(intensity, 0.0, 1.0)
+	for jet in _jump_jet_meshes:
+		jet.visible = visible_intensity > 0.0
+		jet.scale = Vector3.ONE * visible_intensity
+
+
+func set_jump_animation(crouch_amount: float, tuck_amount: float, body_pitch_degrees: float) -> void:
+	_jump_crouch_amount = clampf(crouch_amount, 0.0, 1.0)
+	_jump_tuck_amount = clampf(tuck_amount, 0.0, 1.0)
+	_jump_body_pitch_radians = deg_to_rad(body_pitch_degrees)
 
 
 func set_walking(active: bool, forward_speed: float = 2.5) -> void:
@@ -413,12 +452,15 @@ func _update_walking_pose() -> void:
 	# cancels the combined pitch so the foot remains nearly level.
 	var knee_bend := deg_to_rad(default_knee_bend_degrees)
 	var thigh_forward := deg_to_rad(default_thigh_forward_degrees)
-	_right_leg.rotation.x = -thigh_forward + right_pose.x * blend
-	_right_shin.rotation.x = knee_bend + right_pose.y * blend
-	_right_foot.rotation.x = thigh_forward - knee_bend + right_pose.z * blend
-	_left_leg.rotation.x = -thigh_forward + left_pose.x * blend
-	_left_shin.rotation.x = knee_bend + left_pose.y * blend
-	_left_foot.rotation.x = thigh_forward - knee_bend + left_pose.z * blend
+	var jump_knee_bend := deg_to_rad(jump_crouch_knee_bend_degrees) * _jump_crouch_amount
+	jump_knee_bend += deg_to_rad(jump_tuck_knee_bend_degrees) * _jump_tuck_amount
+	var jump_hip_load := deg_to_rad(8.0) * _jump_crouch_amount
+	_right_leg.rotation.x = -thigh_forward + right_pose.x * blend + jump_hip_load
+	_right_shin.rotation.x = knee_bend + right_pose.y * blend + jump_knee_bend
+	_right_foot.rotation.x = thigh_forward - knee_bend - jump_knee_bend + right_pose.z * blend
+	_left_leg.rotation.x = -thigh_forward + left_pose.x * blend + jump_hip_load
+	_left_shin.rotation.x = knee_bend + left_pose.y * blend + jump_knee_bend
+	_left_foot.rotation.x = thigh_forward - knee_bend - jump_knee_bend + left_pose.z * blend
 
 	# UpperBodyRig is parented to PelvisRig. Cancel the inherited pelvis yaw first,
 	# then apply the requested counter rotation as a visible world-space angle.
@@ -426,11 +468,11 @@ func _update_walking_pose() -> void:
 	var pelvis_yaw := -counter_signal * pelvis_twist
 	_pelvis_rig.rotation.y = pelvis_yaw * blend
 	_upper_body_rig.rotation.y = -pelvis_yaw * (1.0 + torso_counter_ratio) * blend
-	_upper_body_rig.rotation.x = deg_to_rad(walking_forward_lean_degrees) * blend
+	_upper_body_rig.rotation.x = deg_to_rad(walking_forward_lean_degrees) * blend + _jump_body_pitch_radians
 	var support_side := cos(phase)
 	_pelvis_rig.position = Vector3(
 		support_side * lateral_weight_shift * blend,
-		PELVIS_HEIGHT - _contact_compression(phase) * contact_dip * blend,
+		PELVIS_HEIGHT - _contact_compression(phase) * contact_dip * blend - _jump_crouch_amount * jump_crouch_pelvis_drop,
 		0.0
 	)
 	# Keep the legs aligned with their hip lanes; the waist can twist independently.

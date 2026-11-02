@@ -15,9 +15,16 @@ const CAMERA_INITIAL_TARGET := Vector3(0, 1.35, 0)
 const CAMERA_INITIAL_OFFSET := Vector3(0, 14.65, 29.0)
 const CAMERA_FOCUS_DISTANCE := 14.0
 const WAYPOINT_ARRIVAL_RADIUS := 0.5
+const WAYPOINT_ARRIVAL_EPSILON := 0.0001
 const WAYPOINT_MARKER_RADIUS := 0.32
 const WAYPOINT_MARKER_SEGMENTS := 16
 const WAYPOINT_VISUAL_HEIGHT := 0.06
+const JUMP_MARKER_RADIUS := 0.55
+const JUMP_ARC_SEGMENTS := 16
+const JUMP_TAKEOFF_HEIGHT_TOLERANCE := 0.1
+const JUMP_ROUTE_ALIGNMENT_TOLERANCE := MATE_SPACING * 0.5
+const WALK_BODY_RADIUS := 0.35
+const WALK_BODY_HEIGHT := 2.7
 
 @export_group("Camera Controls")
 @export_range(1.0, 40.0, 0.5) var pan_speed := 12.0
@@ -31,6 +38,15 @@ const WAYPOINT_VISUAL_HEIGHT := 0.06
 @export_group("Squad Movement")
 @export_range(0.5, 10.0, 0.1) var squad_move_speed := 2.5
 @export_range(15.0, 180.0, 1.0) var squad_turn_speed_degrees_per_second := 90.0
+@export_range(0.5, 4.0, 0.25) var local_avoidance_max_widths := 2.0
+
+@export_group("Jump Movement")
+@export_range(0.5, 6.0, 0.1) var maximum_jump_height := 2.9
+@export_range(0.2, 3.0, 0.05) var jump_duration_seconds := 0.8
+@export_range(0.5, 6.0, 0.1) var jump_arc_height := 2.9
+@export_range(0.05, 0.4, 0.01) var jump_anticipation_seconds := 0.15
+@export_range(0.05, 0.4, 0.01) var jump_landing_recovery_seconds := 0.15
+@export_range(0.0, 15.0, 0.5) var jump_body_pitch_degrees := 8.0
 
 @export_group("Walking Motion")
 @export_range(0.8, 3.0, 0.1) var walking_stride_length := 3.0
@@ -77,11 +93,23 @@ var _simulation_root: Node3D
 var _squad_waypoints: Array[Array] = []
 var _squad_headings: Array[float] = []
 var _squad_turning_active: Array[bool] = []
+var _squad_jump_sequences: Array[Dictionary] = []
+var _squad_jump_preparations: Array[Dictionary] = []
+var _squad_blocked: Array[bool] = []
+var _squad_traversed_jump_connections: Array[Dictionary] = []
+var _reserved_jump_landings: Array[Vector3] = []
+var _mate_lateral_offsets: Dictionary = {}
+var _jump_visual_fit_cache: Dictionary = {}
 var _waypoint_visual: MeshInstance3D
 var _waypoint_visual_mesh: ImmediateMesh
 var _waypoint_origin_visual: MeshInstance3D
 var _waypoint_origin_mesh: ImmediateMesh
 var _waypoint_visual_material: StandardMaterial3D
+var _jump_visual: MeshInstance3D
+var _jump_visual_mesh: ImmediateMesh
+var _jump_route_material: StandardMaterial3D
+var _jump_takeoff_material: StandardMaterial3D
+var _jump_landing_material: StandardMaterial3D
 var _prepared := false
 
 
@@ -141,6 +169,22 @@ func get_squad_point(squad_number: int) -> Vector3:
 		return _squad_centers[index] if index < _squad_centers.size() else Vector3.ZERO
 	var center := _minimum_enclosing_circle_center(positions)
 	return Vector3(center.x, 0.0, center.y)
+
+
+func _get_squad_movement_point(squad_number: int) -> Vector3:
+	var point := get_squad_point(squad_number)
+	var index := squad_number - 1
+	if index < 0 or index >= _squad_mates.size():
+		return point
+	var height_total := 0.0
+	var living_count := 0
+	for mate in _squad_mates[index]:
+		if mate != null and mate.is_alive():
+			height_total += mate.global_position.y
+			living_count += 1
+	if living_count > 0:
+		point.y = height_total / float(living_count)
+	return point
 
 
 func get_squad_waypoints(squad_number: int) -> Array[Vector3]:
@@ -257,13 +301,19 @@ func _set_waypoint_from_screen(screen_position: Vector2, append: bool) -> bool:
 		return false
 	var ray_origin := _camera.project_ray_origin(screen_position)
 	var ray_direction := _camera.project_ray_normal(screen_position)
-	var ground_point: Variant = Plane(Vector3.UP, 0.0).intersects_ray(ray_origin, ray_direction)
-	if ground_point == null:
+	var query := PhysicsRayQueryParameters3D.create(ray_origin, ray_origin + ray_direction * 1000.0)
+	query.collision_mask = 6
+	query.collide_with_areas = true
+	var hit := get_world_3d().direct_space_state.intersect_ray(query)
+	if hit.is_empty():
 		return false
 	var route: Array = _squad_waypoints[_selected_squad_number - 1]
 	if not append:
 		route.clear()
-	route.append(Vector3(ground_point.x, 0.0, ground_point.z))
+		_squad_jump_preparations[_selected_squad_number - 1].clear()
+		_squad_traversed_jump_connections[_selected_squad_number - 1].clear()
+		_set_squad_blocked(_selected_squad_number - 1, false)
+	route.append(hit.position)
 	_refresh_waypoint_visual()
 	_set_continuous_rendering(true)
 	return true
@@ -279,25 +329,94 @@ func _process_squad_movement(delta: float) -> bool:
 				mate.set_walking(false)
 				mate.set_standing_turn(false)
 		var route: Array = _squad_waypoints[index]
-		if route.is_empty():
-			continue
 		var mates: Array[MatePreview] = _squad_mates[index]
+		if bool(_squad_jump_sequences[index].get("active", false)):
+			_process_squad_jump(index, delta)
+			any_active = true
+			any_positions_moved = true
+			continue
+		if route.is_empty():
+			_squad_jump_preparations[index].clear()
+			var recovered := _recover_squad_lateral_offsets(mates, delta)
+			any_active = any_active or recovered
+			any_positions_moved = any_positions_moved or recovered
+			continue
 		var living_mates: Array[MatePreview] = []
 		for mate in mates:
 			if mate != null and mate.is_alive():
 				living_mates.append(mate)
 		if living_mates.is_empty():
 			route.clear()
+			_squad_jump_preparations[index].clear()
+			_squad_traversed_jump_connections[index].clear()
 			route_changed = true
 			continue
 		var movement_budget := squad_move_speed * delta
 		while not route.is_empty():
 			var point := get_squad_point(index + 1)
 			var waypoint: Vector3 = route[0]
-			var direction := Vector3(waypoint.x - point.x, 0.0, waypoint.z - point.z)
+			var movement_point := _get_squad_movement_point(index + 1)
+			var preparation: Dictionary = _squad_jump_preparations[index]
+			var has_matching_preparation: bool = not preparation.is_empty() and preparation.get("waypoint") == waypoint
+			var jump_route: Dictionary = preparation["jump_route"] if has_matching_preparation else _get_squad_jump_route(index, waypoint, movement_point)
+			if bool(jump_route.get("blocked", false)):
+				_squad_jump_preparations[index].clear()
+				_set_squad_blocked(index, true, String(jump_route.get("blocked_reason", "jump route is not traversable")))
+				break
+			var travel_target: Vector3 = jump_route["takeoff"] if not jump_route.is_empty() else waypoint
+			if not jump_route.is_empty() and not has_matching_preparation:
+				var approach := _get_fitted_jump_approach(mates, point, travel_target)
+				if not bool(approach.get("valid", false)):
+					_set_squad_blocked(index, true, String(approach.get("reason", "jump approach has no support")))
+					break
+				travel_target = approach["position"]
+			if jump_route.is_empty():
+				_squad_jump_preparations[index].clear()
+			if not jump_route.is_empty() and (
+				has_matching_preparation
+				or _has_reached_travel_target(point, travel_target)
+			):
+				var preparation_result := _prepare_squad_jump(index, mates, point, jump_route, waypoint, delta)
+				var preparation_status := String(preparation_result.get("status", "blocked"))
+				if preparation_status == "ready":
+					var jump_start_failure := _begin_squad_jump(
+						index,
+						mates,
+						jump_route,
+						waypoint,
+						preparation_result["targets"]
+					)
+					var jump_started := jump_start_failure.is_empty()
+					if jump_started:
+						_restore_preparation_offsets(mates, _squad_jump_preparations[index])
+					_squad_jump_preparations[index].clear()
+					_set_squad_blocked(index, not jump_started, jump_start_failure)
+					any_active = any_active or jump_started
+					any_positions_moved = any_positions_moved or jump_started
+				elif preparation_status == "moving":
+					_set_squad_blocked(index, false)
+					any_active = true
+					any_positions_moved = true
+				elif preparation_status == "waiting":
+					_set_squad_blocked(index, false)
+					var waiting_preparation: Dictionary = _squad_jump_preparations[index]
+					if not bool(waiting_preparation.get("wait_reason_logged", false)):
+						push_warning("Squad %d waiting to clear jump landing slots: %s" % [
+							index + 1,
+						String(preparation_result.get("reason", "no safe sidestep available")),
+						])
+						waiting_preparation["wait_reason_logged"] = true
+						_squad_jump_preparations[index] = waiting_preparation
+					any_active = true
+				else:
+					_squad_jump_preparations[index].clear()
+					_set_squad_blocked(index, true, String(preparation_result.get("reason", "jump preparation failed")))
+				break
+			var direction := Vector3(travel_target.x - point.x, 0.0, travel_target.z - point.z)
 			var distance := direction.length()
-			if distance <= WAYPOINT_ARRIVAL_RADIUS:
+			if _has_reached_travel_target(point, travel_target):
 				route.pop_front()
+				_remove_completed_jump_waypoint(index, waypoint)
 				route_changed = true
 				continue
 			var target_heading := atan2(direction.x, direction.z)
@@ -352,13 +471,29 @@ func _process_squad_movement(delta: float) -> bool:
 			if travel_distance <= 0.0:
 				break
 			var displacement := direction / distance * travel_distance
+			var lateral := Vector3(-direction.z / distance, 0.0, direction.x / distance)
+			var any_member_moved := false
+			var blocking_reason := ""
 			for mate in living_mates:
-				mate.position += displacement
+				var move_result := _get_member_walk_displacement(mate, displacement, lateral)
+				var member_displacement: Vector3 = move_result["displacement"]
+				if member_displacement.is_zero_approx():
+					mate.set_walking(false)
+					if blocking_reason.is_empty():
+						blocking_reason = String(move_result.get("blocked_reason", "movement helper returned a zero displacement"))
+					continue
+				mate.position += member_displacement
 				mate.set_walking(true, squad_move_speed)
+				any_member_moved = true
+			if not any_member_moved:
+				_set_squad_blocked(index, true, "all squad members blocked while moving toward %s: %s" % [travel_target, blocking_reason])
+				break
+			_set_squad_blocked(index, false)
 			any_active = true
 			any_positions_moved = true
-			if travel_distance + WAYPOINT_ARRIVAL_RADIUS >= distance:
+			if jump_route.is_empty() and _has_reached_travel_target(get_squad_point(index + 1), travel_target):
 				route.pop_front()
+				_remove_completed_jump_waypoint(index, waypoint)
 				route_changed = true
 			break
 	for squad_mates in _squad_mates:
@@ -374,6 +509,802 @@ func _process_squad_movement(delta: float) -> bool:
 		if any_positions_moved:
 			_refresh_waypoint_origin_visual()
 	return any_active
+
+
+func _has_reached_travel_target(point: Vector3, target: Vector3) -> bool:
+	return Vector2(point.x - target.x, point.z - target.z).length() <= WAYPOINT_ARRIVAL_RADIUS + WAYPOINT_ARRIVAL_EPSILON
+
+
+func _recover_squad_lateral_offsets(mates: Array[MatePreview], delta: float) -> bool:
+	var any_moved := false
+	for mate in mates:
+		if mate == null or not mate.is_alive():
+			continue
+		var mate_id := mate.get_instance_id()
+		var current_offset: Vector3 = _mate_lateral_offsets.get(mate_id, Vector3.ZERO)
+		if current_offset.is_zero_approx():
+			_mate_lateral_offsets.erase(mate_id)
+			continue
+		var return_move := -current_offset.normalized() * minf(current_offset.length(), squad_move_speed * delta)
+		if not _can_walk_displacement(mate, return_move):
+			continue
+		mate.position += return_move
+		mate.set_walking(true, squad_move_speed)
+		var remaining_offset := current_offset + return_move
+		if remaining_offset.is_zero_approx():
+			_mate_lateral_offsets.erase(mate_id)
+		else:
+			_mate_lateral_offsets[mate_id] = remaining_offset
+		any_moved = true
+	return any_moved
+
+
+func _get_member_walk_displacement(mate: MatePreview, desired_displacement: Vector3, lateral: Vector3) -> Dictionary:
+	var mate_id := mate.get_instance_id()
+	var current_offset: Vector3 = _mate_lateral_offsets.get(mate_id, Vector3.ZERO)
+	var desired_path_clear := _can_walk_displacement(mate, desired_displacement)
+	var failed_attempts: Array[String] = []
+	if desired_path_clear:
+		if current_offset.is_zero_approx():
+			return {"displacement": desired_displacement}
+		var return_distance := minf(current_offset.length(), desired_displacement.length())
+		var return_move := -current_offset.normalized() * return_distance
+		var return_candidate := desired_displacement + return_move
+		if not return_candidate.is_zero_approx() and _can_walk_displacement(mate, return_candidate):
+			var remaining_offset := current_offset + return_move
+			if remaining_offset.is_zero_approx():
+				_mate_lateral_offsets.erase(mate_id)
+			else:
+				_mate_lateral_offsets[mate_id] = remaining_offset
+			return {"displacement": return_candidate}
+		return {"displacement": desired_displacement}
+	failed_attempts.append("forward: %s" % _get_walk_blocking_reason(mate, desired_displacement))
+
+	var max_offset_distance := local_avoidance_max_widths * WALK_BODY_RADIUS * 2.0
+	if not current_offset.is_zero_approx():
+		var clearance_return_move := -current_offset.normalized() * minf(current_offset.length(), desired_displacement.length())
+		var clearance_return_candidate := desired_displacement + clearance_return_move
+		if not clearance_return_candidate.is_zero_approx() and _can_walk_displacement(mate, clearance_return_candidate):
+			var clearance_remaining_offset := current_offset + clearance_return_move
+			if clearance_remaining_offset.is_zero_approx():
+				_mate_lateral_offsets.erase(mate_id)
+			else:
+				_mate_lateral_offsets[mate_id] = clearance_remaining_offset
+			return {"displacement": clearance_return_candidate}
+	var side_order: Array[float] = [1.0, -1.0]
+	if current_offset.dot(lateral) > 0.0:
+		side_order = [-1.0, 1.0]
+	for side_sign: float in side_order:
+		var side_amount: float = minf(desired_displacement.length(), max_offset_distance)
+		var side_move: Vector3 = lateral * side_sign * side_amount
+		var combined_move: Vector3 = (desired_displacement + side_move).normalized() * desired_displacement.length()
+		var combined_side_amount: float = combined_move.dot(lateral)
+		var combined_offset: Vector3 = current_offset + lateral * combined_side_amount
+		if combined_offset.length() <= max_offset_distance + 0.001 and _can_walk_displacement(mate, combined_move):
+			_mate_lateral_offsets[mate_id] = combined_offset
+			return {"displacement": combined_move}
+		if combined_offset.length() <= max_offset_distance + 0.001:
+			failed_attempts.append("forward + lateral %.0f: %s" % [side_sign, _get_walk_blocking_reason(mate, combined_move)])
+		var next_offset: Vector3 = current_offset + side_move
+		if next_offset.length() > max_offset_distance + 0.001:
+			continue
+		if _can_walk_displacement(mate, side_move):
+			_mate_lateral_offsets[mate_id] = next_offset
+			return {"displacement": side_move}
+		failed_attempts.append("lateral %.0f: %s" % [side_sign, _get_walk_blocking_reason(mate, side_move)])
+	return {
+		"displacement": Vector3.ZERO,
+		"blocked_reason": "no clear forward or lateral step within %.2f world units (%s)" % [
+			max_offset_distance,
+			"; ".join(failed_attempts),
+		],
+	}
+
+
+func _can_walk_displacement(mate: MatePreview, displacement: Vector3) -> bool:
+	return _get_walk_blocking_reason(mate, displacement).is_empty()
+
+
+func _get_walk_blocking_reason(mate: MatePreview, displacement: Vector3) -> String:
+	var body_shape := CapsuleShape3D.new()
+	body_shape.radius = WALK_BODY_RADIUS
+	body_shape.height = WALK_BODY_HEIGHT
+	var space := get_world_3d().direct_space_state
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = body_shape
+	query.transform = Transform3D(Basis.IDENTITY, mate.global_position + Vector3.UP * body_shape.height * 0.5)
+	query.motion = displacement
+	query.collision_mask = 1
+	query.collide_with_areas = false
+	var motion_fractions := space.cast_motion(query)
+	if not motion_fractions.is_empty() and motion_fractions[0] < 1.0:
+		var collision := space.get_rest_info(query)
+		var collider: Object = collision.get("collider") if not collision.is_empty() else null
+		var collider_name := String(collider.get("name")) if collider != null else "unknown"
+		return "world collider %s" % collider_name
+	var segment_start := Vector2(mate.global_position.x, mate.global_position.z)
+	var segment := Vector2(displacement.x, displacement.z)
+	var segment_length_squared := segment.length_squared()
+	if segment_length_squared == 0.0:
+		return ""
+	for squad_mates in _squad_mates:
+		for other_mate in squad_mates:
+			if other_mate == null or other_mate == mate or not other_mate.is_alive():
+				continue
+			if absf(other_mate.global_position.y - mate.global_position.y) >= WALK_BODY_HEIGHT:
+				continue
+			var other_position := Vector2(other_mate.global_position.x, other_mate.global_position.z)
+			var initial_separation := segment_start.distance_to(other_position)
+			if initial_separation < WALK_BODY_RADIUS * 2.0:
+				var moving_away := (other_position - segment_start).dot(segment) <= 0.0
+				if moving_away and (segment_start + segment).distance_to(other_position) > initial_separation:
+					continue
+			var closest_progress := clampf((other_position - segment_start).dot(segment) / segment_length_squared, 0.0, 1.0)
+			var closest_point := segment_start + segment * closest_progress
+			var separation := closest_point.distance_to(other_position)
+			if separation < WALK_BODY_RADIUS * 2.0:
+				return "unit %s at %.2f units (minimum %.2f)" % [other_mate.name, separation, WALK_BODY_RADIUS * 2.0]
+	return ""
+
+
+func _set_squad_blocked(index: int, is_blocked: bool, reason: String = "") -> void:
+	if index < 0 or index >= _squad_blocked.size() or _squad_blocked[index] == is_blocked:
+		return
+	_squad_blocked[index] = is_blocked
+	if is_blocked and not reason.is_empty():
+		push_warning("Squad %d movement blocked: %s" % [index + 1, reason])
+	if _selected_squad_number == index + 1:
+		_refresh_waypoint_visual()
+
+
+func _find_jump_route(waypoint: Vector3, current_position: Vector3, traversed_connections: Array) -> Dictionary:
+	var best_route: Dictionary = {}
+	var rejected_target: Dictionary = {}
+	var best_route_progress := INF
+	for node in get_tree().get_nodes_in_group("jump_connections"):
+		var connection: JumpConnection = node as JumpConnection
+		if connection == null:
+			continue
+		for reverse in [false, true]:
+			if traversed_connections.has(connection):
+				continue
+			var takeoff: Vector3 = connection.get_takeoff_position(reverse)
+			var landing: Vector3 = connection.get_landing_position(reverse)
+			if absf(current_position.y - takeoff.y) > JUMP_TAKEOFF_HEIGHT_TOLERANCE:
+				continue
+			if connection.contains_landing_point(waypoint, reverse):
+				if not connection.can_traverse(reverse, maximum_jump_height):
+					if rejected_target.is_empty():
+						var reason := ""
+						if reverse and not connection.bidirectional:
+							reason = "connection %s reverse direction is disabled" % connection.name
+						elif is_zero_approx(landing.y - takeoff.y):
+							reason = "connection %s has no height difference" % connection.name
+						else:
+							reason = "connection %s %s height delta %.2f exceeds maximum %.2f" % [
+								connection.name,
+								"reverse" if reverse else "forward",
+								absf(landing.y - takeoff.y),
+								maximum_jump_height,
+							]
+						rejected_target = {"blocked": true, "blocked_reason": reason}
+					continue
+				return _make_jump_route(connection, reverse, takeoff, landing)
+			if not connection.can_traverse(reverse, maximum_jump_height):
+				continue
+			var route_progress := _jump_route_progress(current_position, waypoint, takeoff, landing)
+			if route_progress >= 0.0 and route_progress < best_route_progress:
+				best_route_progress = route_progress
+				best_route = _make_jump_route(connection, reverse, takeoff, landing)
+	return rejected_target if not rejected_target.is_empty() else best_route
+
+
+func _make_jump_route(connection: JumpConnection, reverse: bool, takeoff: Vector3, landing: Vector3) -> Dictionary:
+	return {
+		"connection": connection,
+		"reverse": reverse,
+		"takeoff": takeoff,
+		"landing": landing,
+	}
+
+
+func _jump_route_progress(
+	current_position: Vector3,
+	waypoint: Vector3,
+	takeoff: Vector3,
+	landing: Vector3
+) -> float:
+	var route_start := Vector2(current_position.x, current_position.z)
+	var route_vector := Vector2(waypoint.x - current_position.x, waypoint.z - current_position.z)
+	var route_length_squared := route_vector.length_squared()
+	if route_length_squared <= 0.0001:
+		return -1.0
+	var takeoff_point := Vector2(takeoff.x, takeoff.z)
+	var landing_point := Vector2(landing.x, landing.z)
+	var takeoff_progress := (takeoff_point - route_start).dot(route_vector) / route_length_squared
+	var landing_progress := (landing_point - route_start).dot(route_vector) / route_length_squared
+	if takeoff_progress < 0.0 or landing_progress > 1.0 or landing_progress <= takeoff_progress:
+		return -1.0
+	var takeoff_projection := route_start + route_vector * takeoff_progress
+	var landing_projection := route_start + route_vector * landing_progress
+	var takeoff_distance := takeoff_point.distance_to(takeoff_projection)
+	var landing_distance := landing_point.distance_to(landing_projection)
+	if takeoff_distance > JUMP_ROUTE_ALIGNMENT_TOLERANCE or landing_distance > JUMP_ROUTE_ALIGNMENT_TOLERANCE:
+		return -1.0
+	var jump_vector := landing_point - takeoff_point
+	if jump_vector.dot(route_vector) <= 0.0:
+		return -1.0
+	return takeoff_progress
+
+
+func _get_squad_jump_route(index: int, waypoint: Vector3, current_position: Vector3) -> Dictionary:
+	if index < 0 or index >= _squad_traversed_jump_connections.size():
+		return {}
+	var connections_for_waypoint: Array = _squad_traversed_jump_connections[index].get(waypoint, [])
+	return _find_jump_route(waypoint, current_position, connections_for_waypoint)
+
+
+func _get_squad_jump_routes(index: int, waypoint: Vector3, current_position: Vector3) -> Array[Dictionary]:
+	var routes: Array[Dictionary] = []
+	if index < 0 or index >= _squad_traversed_jump_connections.size():
+		return routes
+	var traversed_connections: Array = _squad_traversed_jump_connections[index].get(waypoint, [])
+	var planned_connections: Array = traversed_connections.duplicate()
+	var planning_position := current_position
+	var maximum_route_jumps := get_tree().get_nodes_in_group("jump_connections").size()
+	for _jump_index in range(maximum_route_jumps):
+		var jump_route := _find_jump_route(waypoint, planning_position, planned_connections)
+		if jump_route.is_empty() or bool(jump_route.get("blocked", false)):
+			break
+		var visual_route := jump_route.duplicate()
+		visual_route["visual_takeoff"] = _get_visual_jump_position(index, jump_route, true)
+		visual_route["visual_landing"] = _get_visual_jump_position(index, jump_route, false)
+		routes.append(visual_route)
+		planned_connections.append(jump_route["connection"])
+		planning_position = jump_route["landing"]
+	return routes
+
+
+func _get_visual_jump_position(index: int, jump_route: Dictionary, is_takeoff: bool) -> Vector3:
+	var marker: Vector3 = jump_route["takeoff"] if is_takeoff else jump_route["landing"]
+	var connection: JumpConnection = jump_route["connection"]
+	var preparation: Dictionary = _squad_jump_preparations[index]
+	if not is_takeoff and not preparation.is_empty() and preparation.get("connection") == connection and preparation["jump_route"].get("reverse") == jump_route.get("reverse"):
+		var prepared_targets: Array[Vector3] = preparation["targets"]
+		var points: Array[Vector2] = []
+		for target in _get_living_jump_positions(_squad_mates[index], prepared_targets):
+			points.append(Vector2(target.x, target.z))
+		if not points.is_empty():
+			var center := _minimum_enclosing_circle_center(points)
+			return Vector3(center.x, marker.y, center.y)
+	var key := "%d:%d:%s:%s" % [index, connection.get_instance_id(), str(jump_route.get("reverse", false)), str(is_takeoff)]
+	var cached: Dictionary = _jump_visual_fit_cache.get(key, {})
+	if bool(_squad_jump_sequences[index].get("active", false)) and not cached.is_empty():
+		return cached["position"]
+	var squad_point := get_squad_point(index + 1)
+	var formation: Array[Vector2] = []
+	for mate in _squad_mates[index]:
+		if mate != null and mate.is_alive():
+			var offset: Vector3 = mate.global_position - squad_point
+			formation.append(Vector2(snappedf(offset.x, 0.01), snappedf(offset.z, 0.01)))
+	if not cached.is_empty() and cached.get("formation") == formation:
+		return cached["position"]
+	var fitted := _get_fitted_jump_approach(_squad_mates[index], squad_point, marker)
+	var position: Vector3 = fitted.get("position", marker)
+	_jump_visual_fit_cache[key] = {"formation": formation, "position": position}
+	return position
+
+
+func _jump_visual_position(jump_route: Dictionary, is_takeoff: bool) -> Vector3:
+	var marker_key := "takeoff" if is_takeoff else "landing"
+	var visual_key := "visual_takeoff" if is_takeoff else "visual_landing"
+	return jump_route.get(visual_key, jump_route[marker_key])
+
+
+func _remove_completed_jump_waypoint(index: int, waypoint: Vector3) -> void:
+	_squad_traversed_jump_connections[index].erase(waypoint)
+
+
+func _prepare_squad_jump(
+	index: int,
+	mates: Array[MatePreview],
+	squad_point: Vector3,
+	jump_route: Dictionary,
+	waypoint: Vector3,
+	delta: float
+) -> Dictionary:
+	var connection: JumpConnection = jump_route["connection"]
+	var preparation: Dictionary = _squad_jump_preparations[index]
+	if preparation.is_empty() or preparation.get("connection") != connection or preparation.get("waypoint") != waypoint:
+		var landing: Vector3 = jump_route["landing"]
+		var targets: Array[Vector3] = []
+		var initial_offsets: Dictionary = {}
+		for mate in mates:
+			var formation_offset: Vector3 = mate.global_position - squad_point
+			targets.append(landing + Vector3(formation_offset.x, 0.0, formation_offset.z))
+			initial_offsets[mate.get_instance_id()] = _mate_lateral_offsets.get(mate.get_instance_id(), Vector3.ZERO)
+		var support_result := _fit_landing_formation(mates, targets, landing)
+		if not bool(support_result.get("valid", false)):
+			return {"status": "blocked", "reason": String(support_result.get("reason", "landing surface unavailable"))}
+		targets = support_result["targets"]
+		preparation = {
+			"connection": connection,
+			"jump_route": jump_route.duplicate(),
+			"waypoint": waypoint,
+			"targets": targets,
+			"initial_offsets": initial_offsets,
+		}
+		_squad_jump_preparations[index] = preparation
+	var fixed_targets: Array[Vector3] = preparation["targets"]
+	var living_targets := _get_living_jump_positions(mates, fixed_targets)
+	var landing_issue := _get_landing_slot_issue(living_targets, index)
+	if not landing_issue.is_empty():
+		return {"status": landing_issue["status"], "reason": "jump preparation: connection=%s %s" % [connection.name, landing_issue["reason"]]}
+	var occupant_result := _find_squad_landing_occupant(index, living_targets)
+	if not occupant_result.is_empty():
+		var occupant: MatePreview = occupant_result["mate"]
+		var target: Vector3 = occupant_result["target"]
+		var sidestep_result := _move_landing_occupant_aside(occupant, target, jump_route["takeoff"], delta)
+		if bool(sidestep_result.get("moved", false)):
+			return {"status": "moving"}
+		return {
+			"status": "waiting",
+			"reason": "unit %s cannot clear landing slot %s: %s" % [
+				occupant.name,
+				target,
+				String(sidestep_result.get("reason", "no safe sidestep")),
+			],
+		}
+	var starts: Array[Vector3] = []
+	var takeoff: Vector3 = jump_route["takeoff"]
+	for mate in mates:
+		if mate.is_alive() and absf(mate.global_position.y - takeoff.y) > JUMP_TAKEOFF_HEIGHT_TOLERANCE:
+			return {
+				"status": "blocked",
+				"reason": "jump preparation rejected: unit=%s takeoff_height=%.2f expected=%.2f" % [
+					mate.name,
+					mate.global_position.y,
+					takeoff.y,
+				],
+			}
+		starts.append(mate.global_position)
+	var path_block_reason := _get_jump_path_block_reason(_get_living_jump_positions(mates, starts), living_targets)
+	if not path_block_reason.is_empty():
+		return {"status": "blocked", "reason": "jump preparation blocked: connection=%s %s" % [connection.name, path_block_reason]}
+	return {"status": "ready", "targets": fixed_targets}
+
+
+func _fit_landing_formation(mates: Array[MatePreview], targets: Array[Vector3], landing: Vector3) -> Dictionary:
+	var space := get_world_3d().direct_space_state
+	var ray := PhysicsRayQueryParameters3D.create(landing + Vector3.UP * 0.2, landing - Vector3.UP * 0.2, 2)
+	var hit := space.intersect_ray(ray)
+	if hit.is_empty():
+		return {"valid": false, "reason": "no support beneath jump landing %s" % landing}
+	var collider: CollisionObject3D = hit["collider"] as CollisionObject3D
+	var shape_owner := collider.shape_find_owner(int(hit["shape"]))
+	var shape_node := collider.shape_owner_get_owner(shape_owner) as CollisionShape3D
+	if shape_node == null:
+		return {"valid": false, "reason": "landing support has no collision shape"}
+	var shift := Vector3.ZERO
+	if shape_node.shape is BoxShape3D:
+		var half_size: Vector3 = (shape_node.shape as BoxShape3D).size * 0.5
+		var basis := shape_node.global_transform.basis
+		if absf(basis.y.normalized().dot(Vector3.UP)) < 0.999:
+			return {"valid": false, "reason": "sloped landing support is not supported"}
+		var margin_x := (WALK_BODY_RADIUS + 0.01) / basis.x.length()
+		var margin_z := (WALK_BODY_RADIUS + 0.01) / basis.z.length()
+		var minimum := Vector2(-INF, -INF)
+		var maximum := Vector2(INF, INF)
+		for target in _get_living_jump_positions(mates, targets):
+			var local_target := shape_node.to_local(target)
+			minimum.x = maxf(minimum.x, -half_size.x + margin_x - local_target.x)
+			minimum.y = maxf(minimum.y, -half_size.z + margin_z - local_target.z)
+			maximum.x = minf(maximum.x, half_size.x - margin_x - local_target.x)
+			maximum.y = minf(maximum.y, half_size.z - margin_z - local_target.z)
+		if minimum.x > maximum.x or minimum.y > maximum.y:
+			return {"valid": false, "reason": "formation does not fit on landing support"}
+		var local_shift := Vector3(clampf(0.0, minimum.x, maximum.x), 0.0, clampf(0.0, minimum.y, maximum.y))
+		shift = basis * local_shift
+		shift.y = 0.0
+	var adjusted: Array[Vector3] = []
+	for target in targets:
+		adjusted.append(target + shift)
+	for target in _get_living_jump_positions(mates, adjusted):
+		for offset in [Vector3.ZERO, Vector3.RIGHT * WALK_BODY_RADIUS, Vector3.LEFT * WALK_BODY_RADIUS, Vector3.FORWARD * WALK_BODY_RADIUS, Vector3.BACK * WALK_BODY_RADIUS]:
+			var point: Vector3 = target + offset
+			var support_ray := PhysicsRayQueryParameters3D.create(point + Vector3.UP * 0.2, point - Vector3.UP * 0.2, 2)
+			var support_hit := space.intersect_ray(support_ray)
+			if support_hit.is_empty() or support_hit.get("collider") != collider:
+				return {"valid": false, "reason": "landing position %s lacks support" % target}
+	return {"valid": true, "targets": adjusted}
+
+
+func _get_fitted_jump_approach(mates: Array[MatePreview], squad_point: Vector3, takeoff: Vector3) -> Dictionary:
+	var positions: Array[Vector3] = []
+	var first_living := -1
+	for member_index in range(mates.size()):
+		var offset: Vector3 = mates[member_index].global_position - squad_point
+		positions.append(takeoff + Vector3(offset.x, 0.0, offset.z))
+		if first_living < 0 and mates[member_index].is_alive():
+			first_living = member_index
+	var fitted := _fit_landing_formation(mates, positions, takeoff)
+	if not bool(fitted.get("valid", false)) or first_living < 0:
+		return fitted
+	var adjusted: Array[Vector3] = fitted["targets"]
+	return {"valid": true, "position": takeoff + adjusted[first_living] - positions[first_living]}
+
+
+func _get_living_jump_positions(mates: Array[MatePreview], positions: Array[Vector3]) -> Array[Vector3]:
+	var living_positions: Array[Vector3] = []
+	for member_index in range(mates.size()):
+		if mates[member_index] != null and mates[member_index].is_alive():
+			living_positions.append(positions[member_index])
+	return living_positions
+
+
+func _restore_preparation_offsets(mates: Array[MatePreview], preparation: Dictionary) -> void:
+	var initial_offsets: Dictionary = preparation.get("initial_offsets", {})
+	for mate in mates:
+		var mate_id := mate.get_instance_id()
+		var initial_offset: Vector3 = initial_offsets.get(mate_id, Vector3.ZERO)
+		if initial_offset.is_zero_approx():
+			_mate_lateral_offsets.erase(mate_id)
+		else:
+			_mate_lateral_offsets[mate_id] = initial_offset
+
+
+func _find_squad_landing_occupant(index: int, targets: Array[Vector3]) -> Dictionary:
+	var body_radius := WALK_BODY_RADIUS
+	var body_height := WALK_BODY_HEIGHT
+	var mates: Array[MatePreview] = _squad_mates[index]
+	for target in targets:
+		for mate in mates:
+			if mate == null or not mate.is_alive():
+				continue
+			var occupant: Vector3 = mate.global_position
+			var vertical_overlap := absf(target.y - occupant.y) < body_height
+			var horizontal_overlap := Vector2(target.x - occupant.x, target.z - occupant.z).length() < body_radius * 2.0
+			if vertical_overlap and horizontal_overlap:
+				return {"mate": mate, "target": target}
+	return {}
+
+
+func _move_landing_occupant_aside(
+	mate: MatePreview,
+	target: Vector3,
+	takeoff: Vector3,
+	delta: float
+) -> Dictionary:
+	var max_offset_distance := local_avoidance_max_widths * WALK_BODY_RADIUS * 2.0
+	var mate_id := mate.get_instance_id()
+	var current_offset: Vector3 = _mate_lateral_offsets.get(mate_id, Vector3.ZERO)
+	var away := Vector3(mate.global_position.x - target.x, 0.0, mate.global_position.z - target.z)
+	if away.is_zero_approx():
+		away = Vector3(mate.global_position.x - takeoff.x, 0.0, mate.global_position.z - takeoff.z)
+	if away.is_zero_approx():
+		away = Vector3.FORWARD
+	away = away.normalized()
+	var side_direction := Vector3(-away.z, 0.0, away.x)
+	var directions: Array[Vector3] = [
+		away,
+		(away + side_direction).normalized(),
+		(away - side_direction).normalized(),
+	]
+	var current_target_distance := Vector2(mate.global_position.x - target.x, mate.global_position.z - target.z).length()
+	var needed_clearance := maxf(
+		WALK_BODY_RADIUS * 2.0 + 0.05 - Vector2(mate.global_position.x - target.x, mate.global_position.z - target.z).length(),
+		0.05
+	)
+	var failed_attempts: Array[String] = []
+	for direction: Vector3 in directions:
+		var offset_projection := current_offset.dot(direction)
+		var available_distance := 0.0
+		if current_offset.length() <= max_offset_distance + 0.001:
+			var discriminant := offset_projection * offset_projection + max_offset_distance * max_offset_distance - current_offset.length_squared()
+			available_distance = maxf(0.0, -offset_projection + sqrt(maxf(0.0, discriminant)))
+		elif offset_projection < 0.0:
+			available_distance = -2.0 * offset_projection
+		var step_distance := minf(minf(squad_move_speed * delta, available_distance), needed_clearance)
+		if step_distance <= 0.000001:
+			failed_attempts.append("%s: local avoidance limit %.2f" % [direction, max_offset_distance])
+			continue
+		var displacement: Vector3 = direction * step_distance
+		var candidate_position: Vector3 = mate.global_position + displacement
+		var candidate_distance := Vector2(candidate_position.x - target.x, candidate_position.z - target.z).length()
+		if candidate_distance <= current_target_distance + 0.001:
+			continue
+		if not _can_walk_displacement(mate, displacement):
+			failed_attempts.append("%s: %s" % [direction, _get_walk_blocking_reason(mate, displacement)])
+			continue
+		mate.position += displacement
+		mate.set_walking(true, squad_move_speed)
+		_mate_lateral_offsets[mate_id] = current_offset + displacement
+		return {"moved": true}
+	return {"moved": false, "reason": "; ".join(failed_attempts) if not failed_attempts.is_empty() else "candidate step would not increase clearance"}
+
+
+func _begin_squad_jump(
+	index: int,
+	mates: Array[MatePreview],
+	jump_route: Dictionary,
+	waypoint: Vector3,
+	landing_targets: Array[Vector3]
+) -> String:
+	var starts: Array[Vector3] = []
+	var takeoff: Vector3 = jump_route["takeoff"]
+	var connection: JumpConnection = jump_route["connection"]
+	var direction := "reverse" if bool(jump_route["reverse"]) else "forward"
+	for mate in mates:
+		if mate.is_alive() and absf(mate.global_position.y - takeoff.y) > JUMP_TAKEOFF_HEIGHT_TOLERANCE:
+			return "jump start rejected: connection=%s direction=%s unit=%s takeoff_height=%.2f expected=%.2f tolerance=%.2f" % [
+				connection.name,
+				direction,
+				mate.name,
+				mate.global_position.y,
+				takeoff.y,
+				JUMP_TAKEOFF_HEIGHT_TOLERANCE,
+			]
+		starts.append(mate.global_position)
+	var targets: Array[Vector3] = landing_targets.duplicate()
+	var living_targets := _get_living_jump_positions(mates, targets)
+	var landing_issue := _get_landing_slot_issue(living_targets, index)
+	if not landing_issue.is_empty():
+		return "jump start rejected: connection=%s direction=%s %s" % [connection.name, direction, landing_issue["reason"]]
+	var path_block_reason := _get_jump_path_block_reason(_get_living_jump_positions(mates, starts), living_targets)
+	if not path_block_reason.is_empty():
+		return "jump start rejected: connection=%s direction=%s %s" % [connection.name, direction, path_block_reason]
+	var pending_members: Array[int] = []
+	for member_index in range(mates.size()):
+		if mates[member_index].is_alive():
+			pending_members.append(member_index)
+	var landing: Vector3 = jump_route["landing"]
+	var travel_direction := Vector3(landing.x - takeoff.x, 0.0, landing.z - takeoff.z).normalized()
+	pending_members.sort_custom(func(first: int, second: int) -> bool:
+		return starts[first].dot(travel_direction) > starts[second].dot(travel_direction)
+	)
+	_squad_jump_sequences[index] = {
+		"active": true,
+		"member_index": -1,
+		"pending_members": pending_members,
+		"phase": "waiting",
+		"elapsed": 0.0,
+		"starts": starts,
+		"targets": targets,
+		"reserved_targets": living_targets.duplicate(),
+		"waypoint": waypoint,
+		"connection": jump_route["connection"],
+	}
+	_reserved_jump_landings.append_array(living_targets)
+	return ""
+
+
+func _get_landing_slot_issue(targets: Array[Vector3], ignored_squad_index: int = -1) -> Dictionary:
+	var space := get_world_3d().direct_space_state
+	var body_shape := CapsuleShape3D.new()
+	body_shape.radius = WALK_BODY_RADIUS
+	body_shape.height = WALK_BODY_HEIGHT
+	var reserved: Array[Vector3] = []
+	for target in targets:
+		for other_target in reserved:
+			if Vector2(target.x - other_target.x, target.z - other_target.z).length() < body_shape.radius * 2.0:
+				return {"status": "blocked", "reason": "landing slots overlap within this squad at %s and %s" % [target, other_target]}
+		for other_target in _reserved_jump_landings:
+			if absf(target.y - other_target.y) < body_shape.height and Vector2(target.x - other_target.x, target.z - other_target.z).length() < body_shape.radius * 2.0:
+				return {"status": "waiting", "reason": "landing slot %s overlaps a reserved landing at %s" % [target, other_target]}
+		for squad_index in range(_squad_mates.size()):
+			if squad_index == ignored_squad_index:
+				continue
+			var squad_mates: Array = _squad_mates[squad_index]
+			for other_mate in squad_mates:
+				if other_mate == null or not other_mate.is_alive():
+					continue
+				var occupant: Vector3 = other_mate.global_position
+				if absf(target.y - occupant.y) < body_shape.height and Vector2(target.x - occupant.x, target.z - occupant.z).length() < body_shape.radius * 2.0:
+					return {"status": "waiting", "reason": "landing slot %s occupied by squad %d unit %s at %s" % [target, squad_index + 1, other_mate.name, occupant]}
+		var query := PhysicsShapeQueryParameters3D.new()
+		query.shape = body_shape
+		query.transform = Transform3D(Basis.IDENTITY, target + Vector3.UP * body_shape.height * 0.5)
+		query.collision_mask = 1
+		query.collide_with_areas = false
+		var collisions := space.intersect_shape(query, 1)
+		if not collisions.is_empty():
+			var collider: Object = collisions[0].get("collider")
+			var collider_name := String(collider.get("name")) if collider != null else "unknown"
+			return {"status": "blocked", "reason": "landing slot %s intersects collider %s" % [target, collider_name]}
+		reserved.append(target)
+	return {}
+
+
+func _get_jump_path_block_reason(starts: Array[Vector3], targets: Array[Vector3]) -> String:
+	var space := get_world_3d().direct_space_state
+	var body_shape := CapsuleShape3D.new()
+	body_shape.radius = WALK_BODY_RADIUS
+	body_shape.height = WALK_BODY_HEIGHT
+	for index in range(starts.size()):
+		for sample_index in range(1, 10):
+			var progress := float(sample_index) / 10.0
+			var center := starts[index].lerp(targets[index], progress) + Vector3.UP * _get_jump_arc_offset(progress) + Vector3.UP * body_shape.height * 0.5
+			var query := PhysicsShapeQueryParameters3D.new()
+			query.shape = body_shape
+			query.transform = Transform3D(Basis.IDENTITY, center)
+			query.collision_mask = 1
+			query.collide_with_areas = false
+			var collisions := space.intersect_shape(query, 1)
+			if not collisions.is_empty():
+				var collider: Object = collisions[0].get("collider")
+				var collider_name := String(collider.get("name")) if collider != null else "unknown"
+				return "jump path for unit %d collides at progress %.2f with %s near %s" % [
+					index + 1,
+					progress,
+					collider_name,
+					center,
+				]
+	return ""
+
+
+func _get_jump_arc_offset(progress: float) -> float:
+	var normalized_progress := clampf(progress, 0.0, 1.0)
+	return 4.0 * jump_arc_height * normalized_progress * (1.0 - normalized_progress)
+
+
+func _get_jump_unit_block_reason(mate: MatePreview, start: Vector3, target: Vector3, simulated_positions: Dictionary = {}) -> String:
+	var radius_sum := WALK_BODY_RADIUS * 2.0
+	var whole_segment := Vector2(target.x - start.x, target.z - start.z)
+	var whole_length_squared := whole_segment.length_squared()
+	for squad_mates in _squad_mates:
+		for other_mate in squad_mates:
+			if other_mate == null or other_mate == mate or not other_mate.is_alive():
+				continue
+			var other: Vector3 = simulated_positions.get(other_mate.get_instance_id(), other_mate.global_position)
+			var whole_relative := Vector2(other.x - start.x, other.z - start.z)
+			var whole_fraction := 0.0
+			if whole_length_squared > 0.0:
+				whole_fraction = clampf(whole_relative.dot(whole_segment) / whole_length_squared, 0.0, 1.0)
+			if (whole_relative - whole_segment * whole_fraction).length_squared() >= radius_sum * radius_sum:
+				continue
+			for segment_index in range(32):
+				var from_progress := float(segment_index) / 32.0
+				var to_progress := float(segment_index + 1) / 32.0
+				var from_point: Vector3 = start.lerp(target, from_progress)
+				var to_point: Vector3 = start.lerp(target, to_progress)
+				var segment := Vector2(to_point.x - from_point.x, to_point.z - from_point.z)
+				var relative := Vector2(other.x - from_point.x, other.z - from_point.z)
+				var fraction := 0.0
+				if segment.length_squared() > 0.0:
+					fraction = clampf(relative.dot(segment) / segment.length_squared(), 0.0, 1.0)
+				var progress := lerpf(from_progress, to_progress, fraction)
+				var foot: Vector3 = start.lerp(target, progress) + Vector3.UP * _get_jump_arc_offset(progress)
+				var horizontal_distance := Vector2(foot.x - other.x, foot.z - other.z).length()
+				var vertical_distance := maxf(0.0, maxf((foot.y + WALK_BODY_RADIUS) - (other.y + WALK_BODY_HEIGHT - WALK_BODY_RADIUS), (other.y + WALK_BODY_RADIUS) - (foot.y + WALK_BODY_HEIGHT - WALK_BODY_RADIUS)))
+				if horizontal_distance * horizontal_distance + vertical_distance * vertical_distance < radius_sum * radius_sum:
+					return "unit %s blocks flight of %s near %.2f" % [other_mate.name, mate.name, progress]
+	return ""
+
+
+func _find_safe_jump_order(mates: Array[MatePreview], targets: Array[Vector3], pending: Array[int], simulated_positions: Dictionary = {}) -> Array[int]:
+	for candidate_index in pending:
+		var candidate: MatePreview = mates[candidate_index]
+		var start: Vector3 = simulated_positions.get(candidate.get_instance_id(), candidate.global_position)
+		if not _get_jump_unit_block_reason(candidate, start, targets[candidate_index], simulated_positions).is_empty():
+			continue
+		var remaining: Array[int] = pending.duplicate()
+		remaining.erase(candidate_index)
+		if remaining.is_empty():
+			return [candidate_index]
+		var next_positions := simulated_positions.duplicate()
+		next_positions[candidate.get_instance_id()] = targets[candidate_index]
+		var following := _find_safe_jump_order(mates, targets, remaining, next_positions)
+		if not following.is_empty():
+			following.push_front(candidate_index)
+			return following
+	return []
+
+
+func _process_squad_jump(index: int, delta: float) -> void:
+	var sequence := _squad_jump_sequences[index]
+	var mates: Array[MatePreview] = _squad_mates[index]
+	var pending_members: Array[int] = sequence["pending_members"]
+	for pending_index in pending_members.duplicate():
+		if not mates[pending_index].is_alive():
+			pending_members.erase(pending_index)
+	if pending_members.is_empty():
+		var reserved_targets: Array[Vector3] = sequence.get("reserved_targets", [])
+		for reserved_target in reserved_targets:
+			var reservation_index := _reserved_jump_landings.find(reserved_target)
+			if reservation_index >= 0:
+				_reserved_jump_landings.remove_at(reservation_index)
+		var traversed_waypoint: Vector3 = sequence["waypoint"]
+		var traversed_connections: Array = _squad_traversed_jump_connections[index].get(traversed_waypoint, [])
+		var traversed_connection: JumpConnection = sequence["connection"]
+		if not traversed_connections.has(traversed_connection):
+			traversed_connections.append(traversed_connection)
+		_squad_traversed_jump_connections[index][traversed_waypoint] = traversed_connections
+		sequence["active"] = false
+		_squad_jump_sequences[index] = sequence
+		if _selected_squad_number == index + 1:
+			_refresh_waypoint_visual()
+		return
+	var targets: Array[Vector3] = sequence["targets"]
+	var starts: Array[Vector3] = sequence["starts"]
+	var member_index := int(sequence["member_index"])
+	if member_index < 0 or not pending_members.has(member_index):
+		member_index = -1
+		var waiting_reason := ""
+		var safe_order := _find_safe_jump_order(mates, targets, pending_members)
+		if not safe_order.is_empty():
+			member_index = safe_order[0]
+			starts[member_index] = mates[member_index].global_position
+		else:
+			var first_candidate: MatePreview = mates[pending_members[0]]
+			waiting_reason = _get_jump_unit_block_reason(first_candidate, first_candidate.global_position, targets[pending_members[0]])
+			if waiting_reason.is_empty():
+				waiting_reason = "no collision-free order for remaining units"
+		if member_index < 0:
+			if not bool(sequence.get("wait_reason_logged", false)):
+				push_warning("Squad %d waiting for jump path: %s" % [index + 1, waiting_reason])
+				sequence["wait_reason_logged"] = true
+			_squad_jump_sequences[index] = sequence
+			return
+		sequence["phase"] = "anticipation"
+		sequence["elapsed"] = 0.0
+		sequence["wait_reason_logged"] = false
+	sequence["member_index"] = member_index
+	var mate := mates[member_index]
+	var elapsed := float(sequence["elapsed"]) + delta
+	mate.set_walking(false)
+	mate.set_standing_turn(false)
+	var start_position: Vector3 = starts[member_index]
+	var target_position: Vector3 = targets[member_index]
+	var phase := String(sequence.get("phase", "anticipation"))
+	if phase == "anticipation":
+		var anticipation_progress := clampf(elapsed / jump_anticipation_seconds, 0.0, 1.0)
+		mate.set_jump_animation(smoothstep(0.0, 1.0, anticipation_progress), 0.0, 5.0)
+		mate.set_jump_jet_intensity(0.0)
+		if anticipation_progress >= 1.0:
+			var path_reason := _get_jump_unit_block_reason(mate, start_position, target_position)
+			if path_reason.is_empty():
+				sequence["phase"] = "flight"
+			else:
+				mate.set_jump_animation(0.0, 0.0, 0.0)
+				sequence["member_index"] = -1
+				sequence["phase"] = "waiting"
+			sequence["elapsed"] = 0.0
+		else:
+			sequence["elapsed"] = elapsed
+	elif phase == "flight":
+		var progress := clampf(elapsed / jump_duration_seconds, 0.0, 1.0)
+		mate.global_position = start_position.lerp(target_position, progress) + Vector3.UP * _get_jump_arc_offset(progress)
+		var tuck_amount := sin(PI * progress)
+		var body_pitch := lerpf(-jump_body_pitch_degrees, jump_body_pitch_degrees, progress)
+		mate.set_jump_animation(0.0, tuck_amount, body_pitch)
+		var jet_level := 0.0
+		if progress < 0.18:
+			jet_level = 1.0 - progress / 0.18
+		elif absf(progress - 0.70) < 0.06 or absf(progress - 0.88) < 0.06:
+			jet_level = 1.0
+		mate.set_jump_jet_intensity(jet_level)
+		if progress >= 1.0:
+			mate.global_position = target_position
+			mate.set_jump_jet_intensity(0.0)
+			mate.set_jump_animation(1.0, 0.0, jump_body_pitch_degrees)
+			sequence["phase"] = "landing"
+			sequence["elapsed"] = 0.0
+		else:
+			sequence["elapsed"] = elapsed
+	else:
+		var landing_progress := clampf(elapsed / jump_landing_recovery_seconds, 0.0, 1.0)
+		var compression := 1.0 - smoothstep(0.0, 1.0, landing_progress)
+		mate.set_jump_animation(compression, 0.0, jump_body_pitch_degrees * compression)
+		mate.set_jump_jet_intensity(0.0)
+		if landing_progress >= 1.0:
+			mate.set_jump_animation(0.0, 0.0, 0.0)
+			pending_members.erase(member_index)
+			sequence["member_index"] = -1
+			sequence["phase"] = "waiting"
+			sequence["elapsed"] = 0.0
+		else:
+			sequence["elapsed"] = elapsed
+	_squad_jump_sequences[index] = sequence
 
 
 func _minimum_enclosing_circle_center(points: Array[Vector2]) -> Vector2:
@@ -422,6 +1353,7 @@ func _refresh_waypoint_visual() -> void:
 	if _waypoint_visual_mesh == null:
 		return
 	_waypoint_visual_mesh.clear_surfaces()
+	_refresh_jump_visual()
 	if _selected_squad_number <= 0 or _selected_squad_number > _squad_waypoints.size():
 		_refresh_waypoint_origin_visual()
 		return
@@ -429,15 +1361,25 @@ func _refresh_waypoint_visual() -> void:
 	if route.is_empty():
 		_refresh_waypoint_origin_visual()
 		return
-	_waypoint_visual_material.albedo_color = SQUAD_COLORS[_selected_squad_number - 1]
+	var selected_index := _selected_squad_number - 1
+	var movement_point := _get_squad_movement_point(_selected_squad_number)
+	_waypoint_visual_material.albedo_color = Color("#EF5757") if _squad_blocked[selected_index] else SQUAD_COLORS[selected_index]
 	_waypoint_visual_mesh.surface_begin(Mesh.PRIMITIVE_LINES, _waypoint_visual_material)
 	var previous_point: Vector3 = route[0] + Vector3(0, WAYPOINT_VISUAL_HEIGHT, 0)
 	for index in range(route.size()):
 		var waypoint: Vector3 = route[index]
 		var marker_center: Vector3 = waypoint + Vector3(0, WAYPOINT_VISUAL_HEIGHT, 0)
 		if index > 0:
-			_waypoint_visual_mesh.surface_add_vertex(previous_point)
-			_waypoint_visual_mesh.surface_add_vertex(marker_center)
+			var jump_routes := _get_squad_jump_routes(selected_index, waypoint, movement_point)
+			if not jump_routes.is_empty():
+				_waypoint_visual_mesh.surface_add_vertex(previous_point)
+				for jump_route in jump_routes:
+					_waypoint_visual_mesh.surface_add_vertex(_jump_visual_position(jump_route, true) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
+					_waypoint_visual_mesh.surface_add_vertex(_jump_visual_position(jump_route, false) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
+				_waypoint_visual_mesh.surface_add_vertex(marker_center)
+			else:
+				_waypoint_visual_mesh.surface_add_vertex(previous_point)
+				_waypoint_visual_mesh.surface_add_vertex(marker_center)
 		for segment in range(WAYPOINT_MARKER_SEGMENTS):
 			var first_angle := TAU * float(segment) / WAYPOINT_MARKER_SEGMENTS
 			var second_angle := TAU * float(segment + 1) / WAYPOINT_MARKER_SEGMENTS
@@ -454,6 +1396,7 @@ func _refresh_waypoint_visual() -> void:
 			_waypoint_visual_mesh.surface_add_vertex(first_marker_point)
 			_waypoint_visual_mesh.surface_add_vertex(second_marker_point)
 		previous_point = marker_center
+		movement_point = waypoint
 	_waypoint_visual_mesh.surface_end()
 	_refresh_waypoint_origin_visual()
 
@@ -468,10 +1411,86 @@ func _refresh_waypoint_origin_visual() -> void:
 	if route.is_empty():
 		return
 	var first_waypoint: Vector3 = route[0]
+	var squad_index := _selected_squad_number - 1
+	var jump_routes := _get_squad_jump_routes(
+		squad_index,
+		first_waypoint,
+		_get_squad_movement_point(_selected_squad_number)
+	)
+	var route_origin: Vector3 = get_squad_point(_selected_squad_number) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
 	_waypoint_origin_mesh.surface_begin(Mesh.PRIMITIVE_LINES, _waypoint_visual_material)
-	_waypoint_origin_mesh.surface_add_vertex(get_squad_point(_selected_squad_number) + Vector3(0, WAYPOINT_VISUAL_HEIGHT, 0))
-	_waypoint_origin_mesh.surface_add_vertex(first_waypoint + Vector3(0, WAYPOINT_VISUAL_HEIGHT, 0))
+	_waypoint_origin_mesh.surface_add_vertex(route_origin)
+	if not jump_routes.is_empty():
+		for jump_route in jump_routes:
+			_waypoint_origin_mesh.surface_add_vertex(_jump_visual_position(jump_route, true) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
+			_waypoint_origin_mesh.surface_add_vertex(_jump_visual_position(jump_route, false) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
+		_waypoint_origin_mesh.surface_add_vertex(first_waypoint + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
+	else:
+		_waypoint_origin_mesh.surface_add_vertex(first_waypoint + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 	_waypoint_origin_mesh.surface_end()
+
+
+func _refresh_jump_visual() -> void:
+	if _jump_visual_mesh == null:
+		return
+	_jump_visual_mesh.clear_surfaces()
+	if _selected_squad_number <= 0 or _selected_squad_number > _squad_waypoints.size():
+		return
+	var route: Array = _squad_waypoints[_selected_squad_number - 1]
+	if route.is_empty():
+		return
+	var jump_routes: Array[Dictionary] = []
+	var movement_point := _get_squad_movement_point(_selected_squad_number)
+	for waypoint in route:
+		jump_routes.append_array(_get_squad_jump_routes(
+			_selected_squad_number - 1,
+			waypoint,
+			movement_point
+		))
+		movement_point = waypoint
+	if jump_routes.is_empty():
+		return
+	_jump_visual_mesh.surface_begin(Mesh.PRIMITIVE_LINES, _jump_route_material)
+	for jump_route in jump_routes:
+		var takeoff: Vector3 = _jump_visual_position(jump_route, true)
+		var landing: Vector3 = _jump_visual_position(jump_route, false)
+		var previous_point := takeoff + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
+		for segment in range(1, JUMP_ARC_SEGMENTS + 1):
+			var progress := float(segment) / JUMP_ARC_SEGMENTS
+			var point := takeoff.lerp(landing, progress) + Vector3.UP * (_get_jump_arc_offset(progress) + WAYPOINT_VISUAL_HEIGHT)
+			_jump_visual_mesh.surface_add_vertex(previous_point)
+			_jump_visual_mesh.surface_add_vertex(point)
+			previous_point = point
+	_jump_visual_mesh.surface_end()
+	_draw_jump_markers(jump_routes, _jump_takeoff_material, true)
+	_draw_jump_markers(jump_routes, _jump_landing_material, false)
+
+
+func _draw_jump_markers(jump_routes: Array[Dictionary], material: StandardMaterial3D, is_takeoff: bool) -> void:
+	_jump_visual_mesh.surface_begin(Mesh.PRIMITIVE_LINES, material)
+	for jump_route in jump_routes:
+		var position: Vector3 = _jump_visual_position(jump_route, is_takeoff)
+		var marker_center := position + Vector3.UP * (WAYPOINT_VISUAL_HEIGHT * 1.5)
+		if is_takeoff:
+			for segment in range(JUMP_ARC_SEGMENTS):
+				var first_angle := TAU * float(segment) / JUMP_ARC_SEGMENTS
+				var second_angle := TAU * float(segment + 1) / JUMP_ARC_SEGMENTS
+				_jump_visual_mesh.surface_add_vertex(marker_center + Vector3(cos(first_angle) * JUMP_MARKER_RADIUS, 0.0, sin(first_angle) * JUMP_MARKER_RADIUS))
+				_jump_visual_mesh.surface_add_vertex(marker_center + Vector3(cos(second_angle) * JUMP_MARKER_RADIUS, 0.0, sin(second_angle) * JUMP_MARKER_RADIUS))
+			for axis in [Vector3.RIGHT, Vector3.FORWARD]:
+				_jump_visual_mesh.surface_add_vertex(marker_center - axis * JUMP_MARKER_RADIUS)
+				_jump_visual_mesh.surface_add_vertex(marker_center + axis * JUMP_MARKER_RADIUS)
+		else:
+			var diamond_points: Array[Vector3] = [
+				marker_center + Vector3(JUMP_MARKER_RADIUS, 0.0, 0.0),
+				marker_center + Vector3(0.0, 0.0, JUMP_MARKER_RADIUS),
+				marker_center + Vector3(-JUMP_MARKER_RADIUS, 0.0, 0.0),
+				marker_center + Vector3(0.0, 0.0, -JUMP_MARKER_RADIUS),
+			]
+			for index in range(diamond_points.size()):
+				_jump_visual_mesh.surface_add_vertex(diamond_points[index])
+				_jump_visual_mesh.surface_add_vertex(diamond_points[(index + 1) % diamond_points.size()])
+	_jump_visual_mesh.surface_end()
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
@@ -626,6 +1645,28 @@ func _build_environment() -> void:
 	add_child(fill_light)
 
 
+func _add_jump_platform(platform_name: String, size: Vector3, position: Vector3, material: Material) -> void:
+	var platform := MeshInstance3D.new()
+	platform.name = platform_name
+	var platform_mesh := BoxMesh.new()
+	platform_mesh.size = size
+	platform.mesh = platform_mesh
+	platform.position = position
+	platform.material_override = material
+	add_child(platform)
+	var platform_body := StaticBody3D.new()
+	platform_body.name = "%sCollision" % platform_name
+	platform_body.collision_layer = 2
+	platform_body.collision_mask = 0
+	platform_body.position = position
+	var platform_shape := CollisionShape3D.new()
+	var platform_box := BoxShape3D.new()
+	platform_box.size = size
+	platform_shape.shape = platform_box
+	platform_body.add_child(platform_shape)
+	add_child(platform_body)
+
+
 func _build_ground() -> void:
 	var ground := MeshInstance3D.new()
 	ground.name = "TestFieldGround"
@@ -638,6 +1679,22 @@ func _build_ground() -> void:
 	ground_material.roughness = 0.94
 	ground.material_override = ground_material
 	add_child(ground)
+	var ground_body := StaticBody3D.new()
+	ground_body.name = "TestFieldGroundCollision"
+	ground_body.collision_layer = 2
+	ground_body.collision_mask = 0
+	var ground_shape := CollisionShape3D.new()
+	var ground_plane := WorldBoundaryShape3D.new()
+	ground_plane.plane = Plane(Vector3.UP, 0.0)
+	ground_shape.shape = ground_plane
+	ground_body.add_child(ground_shape)
+	add_child(ground_body)
+
+	_add_jump_platform("JumpLandingPlatform", Vector3(8.0, 0.4, 7.0), Vector3(0.0, 1.4, 16.0), ground_material)
+	var highland_material := StandardMaterial3D.new()
+	highland_material.albedo_color = Color("#34464B")
+	highland_material.roughness = 0.94
+	_add_jump_platform("JumpHighland", Vector3(8.0, 0.4, 7.0), Vector3(0.0, 3.0, 26.0), highland_material)
 
 	var grid_mesh := ImmediateMesh.new()
 	var grid_material := StandardMaterial3D.new()
@@ -664,6 +1721,21 @@ func _build_ground() -> void:
 	_waypoint_visual.mesh = _waypoint_visual_mesh
 	_waypoint_visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_waypoint_visual)
+	_jump_visual_mesh = ImmediateMesh.new()
+	_jump_route_material = StandardMaterial3D.new()
+	_jump_route_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_jump_route_material.albedo_color = Color("#FFE082")
+	_jump_takeoff_material = StandardMaterial3D.new()
+	_jump_takeoff_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_jump_takeoff_material.albedo_color = Color("#FF7043")
+	_jump_landing_material = StandardMaterial3D.new()
+	_jump_landing_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_jump_landing_material.albedo_color = Color("#4DD0E1")
+	_jump_visual = MeshInstance3D.new()
+	_jump_visual.name = "SelectedSquadJumpPlan"
+	_jump_visual.mesh = _jump_visual_mesh
+	_jump_visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_jump_visual)
 	_waypoint_origin_mesh = ImmediateMesh.new()
 	_waypoint_origin_visual = MeshInstance3D.new()
 	_waypoint_origin_visual.name = "SelectedSquadWaypointOrigin"
@@ -716,6 +1788,10 @@ func _build_sample_mates() -> void:
 		_squad_waypoints.append(squad_waypoints)
 		_squad_headings.append(0.0)
 		_squad_turning_active.append(false)
+		_squad_jump_sequences.append({"active": false})
+		_squad_jump_preparations.append({})
+		_squad_blocked.append(false)
+		_squad_traversed_jump_connections.append({})
 		var squad_states: Array[Resource] = []
 		var squad_mates: Array[MatePreview] = []
 		for mate_index in range(3):

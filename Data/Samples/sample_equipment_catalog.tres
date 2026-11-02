@@ -1,50 +1,45 @@
-[gd_resource type="Resource" script_class="EquipmentCatalog" load_steps=17 format=3]
+[gd_resource type="Resource" script_class="EquipmentCatalog" format=3 uid="uid://dhjni55jmxdp7"]
 
-[ext_resource type="Script" path="res://Scripts/Data/equipment_catalog.gd" id="1_catalog"]
-[ext_resource type="Script" path="res://Scripts/Data/mate_definition.gd" id="2_mate"]
-[ext_resource type="Script" path="res://Scripts/Data/shield_definition.gd" id="3_shield"]
-[ext_resource type="Script" path="res://Scripts/Data/main_arm_definition.gd" id="4_arm"]
-[ext_resource type="Script" path="res://Scripts/Data/back_unit_definition.gd" id="5_back"]
-[ext_resource type="Script" path="res://Scripts/Data/expansion_part_definition.gd" id="6_expansion"]
-[ext_resource type="Script" path="res://Scripts/Data/equipment_effect.gd" id="7_effect"]
-[ext_resource type="Script" path="res://Scripts/Data/mate_loadout.gd" id="8_loadout"]
+[ext_resource type="Script" uid="uid://dar2rixhps3mt" path="res://Scripts/Data/equipment_catalog.gd" id="1_catalog"]
+[ext_resource type="Script" uid="uid://byubj35fqre01" path="res://Scripts/Data/mate_definition.gd" id="2_mate"]
+[ext_resource type="Script" uid="uid://dt33j1vwv2st1" path="res://Scripts/Data/shield_definition.gd" id="3_shield"]
+[ext_resource type="Script" uid="uid://c61xans3mdq6u" path="res://Scripts/Data/main_arm_definition.gd" id="4_arm"]
+[ext_resource type="Script" uid="uid://ddjdtvq8prfbm" path="res://Scripts/Data/back_unit_definition.gd" id="5_back"]
+[ext_resource type="Script" uid="uid://dw3lknqy3ms7b" path="res://Scripts/Data/expansion_part_definition.gd" id="6_expansion"]
+[ext_resource type="Script" uid="uid://wmgfjek7cmtb" path="res://Scripts/Data/equipment_effect.gd" id="7_effect"]
+[ext_resource type="Script" uid="uid://y18mo5aq3lxm" path="res://Scripts/Data/mate_loadout.gd" id="8_loadout"]
 
 [sub_resource type="Resource" id="CannonPreviewEffect"]
 script = ExtResource("7_effect")
 type = "visual_only_cannon"
-parameters = {"preview_only": true}
+parameters = {
+"preview_only": true
+}
 
-[sub_resource type="Resource" id="MateSurveyor"]
-script = ExtResource("2_mate")
-id = "mate.proto.surveyor"
-name = "MT-04 Surveyor"
-weight = 72.0
+[sub_resource type="Resource" id="LongCannon"]
+script = ExtResource("5_back")
+unit_type = "cannon"
+effect = SubResource("CannonPreviewEffect")
+ammo_capacity = 18
+reload_time = 4.0
+id = "back.sample.cannon"
+name = "Long Cannon"
+weight = 28.0
 compatible_mate_ids = PackedStringArray("mate.proto.surveyor")
-description = "テストフィールド表示用の暫定機体データ。性能値はゲームバランスを定めない。"
-tags = PackedStringArray("prototype", "sample")
-durability_max = 320.0
-mobility = 5.1
-turn_rate = 1.4
-load_limit = 150.0
-base_weight = 72.0
+description = "第一小隊用の縦長キャノン砲。外観確認用で、射撃処理は未実装。"
+tags = null
 
-[sub_resource type="Resource" id="ShieldSurvey"]
-script = ExtResource("3_shield")
-id = "shield.sample.01"
-name = "Field Guard"
-weight = 18.0
+[sub_resource type="Resource" id="ExpansionSurvey"]
+script = ExtResource("6_expansion")
+id = "expansion.sample.01"
+name = "Survey Sensor"
+weight = 7.0
 compatible_mate_ids = PackedStringArray("mate.proto.surveyor")
-description = "テストフィールド表示用のサンプル盾。"
-durability_max = 140.0
-guard_time = 0.35
+description = "テストフィールド表示用のサンプル拡張パーツ。"
+tags = null
 
 [sub_resource type="Resource" id="ArmSurvey"]
 script = ExtResource("4_arm")
-id = "arm.sample.01"
-name = "Survey Carbine"
-weight = 24.0
-compatible_mate_ids = PackedStringArray("mate.proto.surveyor")
-description = "テストフィールド表示用のサンプルメインアーム。"
 weapon_type = "kinetic_tool"
 damage = 30.0
 accuracy = 82.0
@@ -55,27 +50,26 @@ magazine_size = 12
 reserve_ammo = 72
 reload_time = 2.6
 recoil = 0.4
-
-[sub_resource type="Resource" id="LongCannon"]
-script = ExtResource("5_back")
-id = "back.sample.cannon"
-name = "Long Cannon"
-weight = 28.0
+id = "arm.sample.01"
+name = "Survey Carbine"
+weight = 24.0
 compatible_mate_ids = PackedStringArray("mate.proto.surveyor")
-description = "第一小隊用の縦長キャノン砲。外観確認用で、射撃処理は未実装。"
-unit_type = "cannon"
-effect = SubResource("CannonPreviewEffect")
-ammo_capacity = 18
-reload_time = 4.0
+description = "テストフィールド表示用のサンプルメインアーム。"
+tags = null
 
-[sub_resource type="Resource" id="ExpansionSurvey"]
-script = ExtResource("6_expansion")
-id = "expansion.sample.01"
-name = "Survey Sensor"
-weight = 7.0
+[sub_resource type="Resource" id="MateSurveyor"]
+script = ExtResource("2_mate")
+durability_max = 320.0
+mobility = 5.1
+turn_rate = 1.4
+load_limit = 150.0
+base_weight = 72.0
+id = "mate.proto.surveyor"
+name = "MT-04 Surveyor"
+weight = 72.0
 compatible_mate_ids = PackedStringArray("mate.proto.surveyor")
-description = "テストフィールド表示用のサンプル拡張パーツ。"
-effects = Array[ExtResource("7_effect")]([])
+description = "テストフィールド表示用の暫定機体データ。性能値はゲームバランスを定めない。"
+tags = PackedStringArray("prototype", "sample")
 
 [sub_resource type="Resource" id="LoadoutCannon"]
 script = ExtResource("8_loadout")
@@ -91,6 +85,17 @@ mate_id = "mate.proto.surveyor"
 shield_id = "shield.sample.01"
 main_arm_id = "arm.sample.01"
 expansion_id = "expansion.sample.01"
+
+[sub_resource type="Resource" id="ShieldSurvey"]
+script = ExtResource("3_shield")
+durability_max = 140.0
+guard_time = 0.35
+id = "shield.sample.01"
+name = "Field Guard"
+weight = 18.0
+compatible_mate_ids = PackedStringArray("mate.proto.surveyor")
+description = "テストフィールド表示用のサンプル盾。"
+tags = null
 
 [resource]
 script = ExtResource("1_catalog")
