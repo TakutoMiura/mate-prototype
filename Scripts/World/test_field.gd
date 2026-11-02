@@ -1081,8 +1081,8 @@ func _begin_squad_jump(
 func _get_landing_slot_issue(targets: Array[Vector3], ignored_squad_index: int = -1) -> Dictionary:
 	var space := get_world_3d().direct_space_state
 	var body_shape := CapsuleShape3D.new()
-	body_shape.radius = 0.35
-	body_shape.height = 2.7
+	body_shape.radius = WALK_BODY_RADIUS
+	body_shape.height = WALK_BODY_HEIGHT
 	var reserved: Array[Vector3] = []
 	for target in targets:
 		for other_target in reserved:
@@ -1118,8 +1118,8 @@ func _get_landing_slot_issue(targets: Array[Vector3], ignored_squad_index: int =
 func _get_jump_path_block_reason(starts: Array[Vector3], targets: Array[Vector3]) -> String:
 	var space := get_world_3d().direct_space_state
 	var body_shape := CapsuleShape3D.new()
-	body_shape.radius = 0.35
-	body_shape.height = 2.7
+	body_shape.radius = WALK_BODY_RADIUS
+	body_shape.height = WALK_BODY_HEIGHT
 	for index in range(starts.size()):
 		for sample_index in range(1, 10):
 			var progress := float(sample_index) / 10.0
@@ -1149,16 +1149,17 @@ func _get_jump_arc_offset(progress: float) -> float:
 
 func _get_jump_unit_block_reason(mate: MatePreview, start: Vector3, target: Vector3, simulated_positions: Dictionary = {}) -> String:
 	var radius_sum := WALK_BODY_RADIUS * 2.0
+	var whole_segment := Vector2(target.x - start.x, target.z - start.z)
+	var whole_length_squared := whole_segment.length_squared()
 	for squad_mates in _squad_mates:
 		for other_mate in squad_mates:
 			if other_mate == null or other_mate == mate or not other_mate.is_alive():
 				continue
 			var other: Vector3 = simulated_positions.get(other_mate.get_instance_id(), other_mate.global_position)
-			var whole_segment := Vector2(target.x - start.x, target.z - start.z)
 			var whole_relative := Vector2(other.x - start.x, other.z - start.z)
 			var whole_fraction := 0.0
-			if whole_segment.length_squared() > 0.0:
-				whole_fraction = clampf(whole_relative.dot(whole_segment) / whole_segment.length_squared(), 0.0, 1.0)
+			if whole_length_squared > 0.0:
+				whole_fraction = clampf(whole_relative.dot(whole_segment) / whole_length_squared, 0.0, 1.0)
 			if (whole_relative - whole_segment * whole_fraction).length_squared() >= radius_sum * radius_sum:
 				continue
 			for segment_index in range(32):

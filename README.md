@@ -29,6 +29,8 @@ $env:APPDATA = Join-Path (Get-Location).Path '.godot-user-data'
 
 ## Codex skills
 
+性能の目標は同時30機・60fpsです。評価に使う対象ハードウェア、解像度、画質設定、機体の動作負荷は未決です。
+
 プロジェクト用skillsは `.agents/skills/` にあります。実装時は `$godot-implementation`、仕様に沿ったロジック確認は `$godot-logic-review`、計測を含む性能確認は `$godot-performance-review`、レビュー後の振る舞いを保った整理は `$godot-refactor` を使います。
 
 ## 仕様書
