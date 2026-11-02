@@ -16,6 +16,9 @@ func _run() -> void:
 	await _check_through_route()
 	await _check_staircase_route()
 	await _check_preparation_route_lock()
+	await _check_destroyed_member(false)
+	await _check_destroyed_member(true)
+	await _check_overlapping_connections()
 	await _check_walk_overlap()
 	_check_sidestep_offset()
 	if failures.is_empty():
@@ -229,6 +232,59 @@ func _check_staircase_route() -> void:
 	for mate in mates:
 		if absf(mate.position.y) > 0.01:
 			failures.append("staircase route: %s did not return to ground" % mate.name)
+	field.queue_free()
+	await process_frame
+
+
+func _check_destroyed_member(overlap: bool) -> void:
+	var field := _new_field()
+	await physics_frame
+	var mates: Array = field._squad_mates[1]
+	mates[0]._unit_state.current_hp = 0.0
+	var destroyed_position := Vector3(7.15 if overlap else 50.0, 3.2, 16.0)
+	mates[0].position = destroyed_position
+	mates[1].position = Vector3(7.15, 0.04, 16.0)
+	mates[2].position = Vector3(9.85, 0.04, 16.0)
+	field._squad_waypoints[1].append(Vector3(3.0, 1.6, 16.0))
+	var jump_started := false
+	for frame in range(400):
+		field._process_squad_movement(FRAME_DELTA)
+		if bool(field._squad_blocked[1]):
+			failures.append("destroyed member: surviving squad became BLOCKED at frame %d" % frame)
+			break
+		if bool(field._squad_jump_sequences[1].get("active", false)):
+			jump_started = true
+		if jump_started and not bool(field._squad_jump_sequences[1].get("active", false)):
+			break
+	if not jump_started or absf(mates[1].position.y - 1.6) > 0.01 or absf(mates[2].position.y - 1.6) > 0.01:
+		failures.append("destroyed member: surviving units did not complete the jump")
+	if mates[0].position != destroyed_position:
+		failures.append("destroyed member: inactive unit was moved")
+	if not field._reserved_jump_landings.is_empty():
+		failures.append("destroyed member: jump reservations were not released")
+	field.queue_free()
+	await process_frame
+
+
+func _check_overlapping_connections() -> void:
+	var field := _new_field()
+	await physics_frame
+	var original: JumpConnection = field.get_node("JumpConnectionRight")
+	original.bidirectional = false
+	var alternate: JumpConnection = original.duplicate()
+	alternate.name = "AlternateRightConnection"
+	alternate.bidirectional = true
+	field.add_child(alternate)
+	var target := Vector3(8.5, 0.0, 16.0)
+	var start := Vector3(3.0, 1.6, 16.0)
+	var route: Dictionary = field._find_jump_route(target, start, [])
+	if bool(route.get("blocked", false)) or route.get("connection") != alternate:
+		failures.append("jump routing: forbidden direction hid a valid overlapping connection")
+	alternate.queue_free()
+	await process_frame
+	route = field._find_jump_route(target, start, [])
+	if not bool(route.get("blocked", false)) or not String(route.get("blocked_reason", "")).contains("direction"):
+		failures.append("jump routing: forbidden direction did not report the correct reason")
 	field.queue_free()
 	await process_frame
 

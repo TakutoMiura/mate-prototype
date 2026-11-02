@@ -652,6 +652,7 @@ func _set_squad_blocked(index: int, is_blocked: bool, reason: String = "") -> vo
 
 func _find_jump_route(waypoint: Vector3, current_position: Vector3, traversed_connections: Array) -> Dictionary:
 	var best_route: Dictionary = {}
+	var rejected_target: Dictionary = {}
 	var best_route_progress := INF
 	for node in get_tree().get_nodes_in_group("jump_connections"):
 		var connection: JumpConnection = node as JumpConnection
@@ -666,15 +667,21 @@ func _find_jump_route(waypoint: Vector3, current_position: Vector3, traversed_co
 				continue
 			if connection.contains_landing_point(waypoint, reverse):
 				if not connection.can_traverse(reverse, maximum_jump_height):
-					return {
-						"blocked": true,
-						"blocked_reason": "connection %s %s height delta %.2f exceeds maximum %.2f" % [
-							connection.name,
-							"reverse" if reverse else "forward",
-							absf(landing.y - takeoff.y),
-							maximum_jump_height,
-						],
-					}
+					if rejected_target.is_empty():
+						var reason := ""
+						if reverse and not connection.bidirectional:
+							reason = "connection %s reverse direction is disabled" % connection.name
+						elif is_zero_approx(landing.y - takeoff.y):
+							reason = "connection %s has no height difference" % connection.name
+						else:
+							reason = "connection %s %s height delta %.2f exceeds maximum %.2f" % [
+								connection.name,
+								"reverse" if reverse else "forward",
+								absf(landing.y - takeoff.y),
+								maximum_jump_height,
+							]
+						rejected_target = {"blocked": true, "blocked_reason": reason}
+					continue
 				return _make_jump_route(connection, reverse, takeoff, landing)
 			if not connection.can_traverse(reverse, maximum_jump_height):
 				continue
@@ -682,7 +689,7 @@ func _find_jump_route(waypoint: Vector3, current_position: Vector3, traversed_co
 			if route_progress >= 0.0 and route_progress < best_route_progress:
 				best_route_progress = route_progress
 				best_route = _make_jump_route(connection, reverse, takeoff, landing)
-	return best_route
+	return rejected_target if not rejected_target.is_empty() else best_route
 
 
 func _make_jump_route(connection: JumpConnection, reverse: bool, takeoff: Vector3, landing: Vector3) -> Dictionary:
@@ -779,10 +786,11 @@ func _prepare_squad_jump(
 		}
 		_squad_jump_preparations[index] = preparation
 	var fixed_targets: Array[Vector3] = preparation["targets"]
-	var landing_block_reason := _get_landing_slot_block_reason(fixed_targets, index)
+	var living_targets := _get_living_jump_positions(mates, fixed_targets)
+	var landing_block_reason := _get_landing_slot_block_reason(living_targets, index)
 	if not landing_block_reason.is_empty():
 		return {"status": "blocked", "reason": "jump preparation blocked: connection=%s %s" % [connection.name, landing_block_reason]}
-	var occupant_result := _find_squad_landing_occupant(index, fixed_targets)
+	var occupant_result := _find_squad_landing_occupant(index, living_targets)
 	if not occupant_result.is_empty():
 		var occupant: MatePreview = occupant_result["mate"]
 		var target: Vector3 = occupant_result["target"]
@@ -800,7 +808,7 @@ func _prepare_squad_jump(
 	var starts: Array[Vector3] = []
 	var takeoff: Vector3 = jump_route["takeoff"]
 	for mate in mates:
-		if absf(mate.global_position.y - takeoff.y) > JUMP_TAKEOFF_HEIGHT_TOLERANCE:
+		if mate.is_alive() and absf(mate.global_position.y - takeoff.y) > JUMP_TAKEOFF_HEIGHT_TOLERANCE:
 			return {
 				"status": "blocked",
 				"reason": "jump preparation rejected: unit=%s takeoff_height=%.2f expected=%.2f" % [
@@ -810,10 +818,18 @@ func _prepare_squad_jump(
 				],
 			}
 		starts.append(mate.global_position)
-	var path_block_reason := _get_jump_path_block_reason(starts, fixed_targets)
+	var path_block_reason := _get_jump_path_block_reason(_get_living_jump_positions(mates, starts), living_targets)
 	if not path_block_reason.is_empty():
 		return {"status": "blocked", "reason": "jump preparation blocked: connection=%s %s" % [connection.name, path_block_reason]}
 	return {"status": "ready", "targets": fixed_targets}
+
+
+func _get_living_jump_positions(mates: Array[MatePreview], positions: Array[Vector3]) -> Array[Vector3]:
+	var living_positions: Array[Vector3] = []
+	for member_index in range(mates.size()):
+		if mates[member_index] != null and mates[member_index].is_alive():
+			living_positions.append(positions[member_index])
+	return living_positions
 
 
 func _restore_preparation_offsets(mates: Array[MatePreview], preparation: Dictionary) -> void:
@@ -909,7 +925,7 @@ func _begin_squad_jump(
 	var connection: JumpConnection = jump_route["connection"]
 	var direction := "reverse" if bool(jump_route["reverse"]) else "forward"
 	for mate in mates:
-		if absf(mate.global_position.y - takeoff.y) > JUMP_TAKEOFF_HEIGHT_TOLERANCE:
+		if mate.is_alive() and absf(mate.global_position.y - takeoff.y) > JUMP_TAKEOFF_HEIGHT_TOLERANCE:
 			return "jump start rejected: connection=%s direction=%s unit=%s takeoff_height=%.2f expected=%.2f tolerance=%.2f" % [
 				connection.name,
 				direction,
@@ -920,10 +936,11 @@ func _begin_squad_jump(
 			]
 		starts.append(mate.global_position)
 	var targets: Array[Vector3] = landing_targets.duplicate()
-	var landing_block_reason := _get_landing_slot_block_reason(targets, index)
+	var living_targets := _get_living_jump_positions(mates, targets)
+	var landing_block_reason := _get_landing_slot_block_reason(living_targets, index)
 	if not landing_block_reason.is_empty():
 		return "jump start rejected: connection=%s direction=%s %s" % [connection.name, direction, landing_block_reason]
-	var path_block_reason := _get_jump_path_block_reason(starts, targets)
+	var path_block_reason := _get_jump_path_block_reason(_get_living_jump_positions(mates, starts), living_targets)
 	if not path_block_reason.is_empty():
 		return "jump start rejected: connection=%s direction=%s %s" % [connection.name, direction, path_block_reason]
 	_squad_jump_sequences[index] = {
@@ -932,11 +949,11 @@ func _begin_squad_jump(
 		"elapsed": 0.0,
 		"starts": starts,
 		"targets": targets,
-		"reserved_targets": targets.duplicate(),
+		"reserved_targets": living_targets.duplicate(),
 		"waypoint": waypoint,
 		"connection": jump_route["connection"],
 	}
-	_reserved_jump_landings.append_array(targets)
+	_reserved_jump_landings.append_array(living_targets)
 	return ""
 
 
