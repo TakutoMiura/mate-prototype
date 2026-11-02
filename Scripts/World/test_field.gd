@@ -40,6 +40,9 @@ const JUMP_ROUTE_ALIGNMENT_TOLERANCE := MATE_SPACING * 0.5
 @export_range(0.5, 6.0, 0.1) var maximum_jump_height := 2.9
 @export_range(0.2, 3.0, 0.05) var jump_duration_seconds := 0.8
 @export_range(0.5, 6.0, 0.1) var jump_arc_height := 2.9
+@export_range(0.05, 0.4, 0.01) var jump_anticipation_seconds := 0.15
+@export_range(0.05, 0.4, 0.01) var jump_landing_recovery_seconds := 0.15
+@export_range(0.0, 15.0, 0.5) var jump_body_pitch_degrees := 8.0
 
 @export_group("Walking Motion")
 @export_range(0.8, 3.0, 0.1) var walking_stride_length := 3.0
@@ -631,7 +634,7 @@ func _has_clear_jump_paths(starts: Array[Vector3], targets: Array[Vector3]) -> b
 	for index in range(starts.size()):
 		for sample_index in range(1, 10):
 			var progress := float(sample_index) / 10.0
-			var center := starts[index].lerp(targets[index], progress) + Vector3.UP * sin(PI * progress) * jump_arc_height + Vector3.UP * body_shape.height * 0.5
+			var center := starts[index].lerp(targets[index], progress) + Vector3.UP * _get_jump_arc_offset(progress) + Vector3.UP * body_shape.height * 0.5
 			var query := PhysicsShapeQueryParameters3D.new()
 			query.shape = body_shape
 			query.transform = Transform3D(Basis.IDENTITY, center)
@@ -642,6 +645,11 @@ func _has_clear_jump_paths(starts: Array[Vector3], targets: Array[Vector3]) -> b
 	return true
 
 
+func _get_jump_arc_offset(progress: float) -> float:
+	var normalized_progress := clampf(progress, 0.0, 1.0)
+	return 4.0 * jump_arc_height * normalized_progress * (1.0 - normalized_progress)
+
+
 func _process_squad_jump(index: int, delta: float) -> void:
 	var sequence := _squad_jump_sequences[index]
 	var mates: Array[MatePreview] = _squad_mates[index]
@@ -649,6 +657,7 @@ func _process_squad_jump(index: int, delta: float) -> void:
 	while member_index < mates.size() and not mates[member_index].is_alive():
 		member_index += 1
 		sequence["elapsed"] = 0.0
+		sequence["phase"] = "anticipation"
 	if member_index >= mates.size():
 		var reserved_targets: Array[Vector3] = sequence.get("reserved_targets", [])
 		for reserved_target in reserved_targets:
@@ -671,25 +680,52 @@ func _process_squad_jump(index: int, delta: float) -> void:
 	var starts: Array[Vector3] = sequence["starts"]
 	var targets: Array[Vector3] = sequence["targets"]
 	var elapsed := float(sequence["elapsed"]) + delta
-	var progress := clampf(elapsed / jump_duration_seconds, 0.0, 1.0)
 	mate.set_walking(false)
 	mate.set_standing_turn(false)
 	var start_position: Vector3 = starts[member_index]
 	var target_position: Vector3 = targets[member_index]
-	mate.global_position = start_position.lerp(target_position, progress) + Vector3.UP * sin(PI * progress) * jump_arc_height
-	var jet_level := 0.0
-	if progress < 0.18:
-		jet_level = 1.0 - progress / 0.18
-	elif absf(progress - 0.70) < 0.06 or absf(progress - 0.88) < 0.06:
-		jet_level = 1.0
-	mate.set_jump_jet_intensity(jet_level)
-	if progress >= 1.0:
-		mate.global_position = target_position
+	var phase := String(sequence.get("phase", "anticipation"))
+	if phase == "anticipation":
+		var anticipation_progress := clampf(elapsed / jump_anticipation_seconds, 0.0, 1.0)
+		mate.set_jump_animation(smoothstep(0.0, 1.0, anticipation_progress), 0.0, 5.0)
 		mate.set_jump_jet_intensity(0.0)
-		sequence["member_index"] = member_index + 1
-		sequence["elapsed"] = 0.0
+		if anticipation_progress >= 1.0:
+			sequence["phase"] = "flight"
+			sequence["elapsed"] = 0.0
+		else:
+			sequence["elapsed"] = elapsed
+	elif phase == "flight":
+		var progress := clampf(elapsed / jump_duration_seconds, 0.0, 1.0)
+		mate.global_position = start_position.lerp(target_position, progress) + Vector3.UP * _get_jump_arc_offset(progress)
+		var tuck_amount := sin(PI * progress)
+		var body_pitch := lerpf(-jump_body_pitch_degrees, jump_body_pitch_degrees, progress)
+		mate.set_jump_animation(0.0, tuck_amount, body_pitch)
+		var jet_level := 0.0
+		if progress < 0.18:
+			jet_level = 1.0 - progress / 0.18
+		elif absf(progress - 0.70) < 0.06 or absf(progress - 0.88) < 0.06:
+			jet_level = 1.0
+		mate.set_jump_jet_intensity(jet_level)
+		if progress >= 1.0:
+			mate.global_position = target_position
+			mate.set_jump_jet_intensity(0.0)
+			mate.set_jump_animation(1.0, 0.0, jump_body_pitch_degrees)
+			sequence["phase"] = "landing"
+			sequence["elapsed"] = 0.0
+		else:
+			sequence["elapsed"] = elapsed
 	else:
-		sequence["elapsed"] = elapsed
+		var landing_progress := clampf(elapsed / jump_landing_recovery_seconds, 0.0, 1.0)
+		var compression := 1.0 - smoothstep(0.0, 1.0, landing_progress)
+		mate.set_jump_animation(compression, 0.0, jump_body_pitch_degrees * compression)
+		mate.set_jump_jet_intensity(0.0)
+		if landing_progress >= 1.0:
+			mate.set_jump_animation(0.0, 0.0, 0.0)
+			sequence["member_index"] = member_index + 1
+			sequence["phase"] = "anticipation"
+			sequence["elapsed"] = 0.0
+		else:
+			sequence["elapsed"] = elapsed
 	_squad_jump_sequences[index] = sequence
 
 
@@ -843,7 +879,7 @@ func _refresh_jump_visual() -> void:
 		var previous_point := takeoff + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
 		for segment in range(1, JUMP_ARC_SEGMENTS + 1):
 			var progress := float(segment) / JUMP_ARC_SEGMENTS
-			var point := takeoff.lerp(landing, progress) + Vector3.UP * (sin(PI * progress) * jump_arc_height + WAYPOINT_VISUAL_HEIGHT)
+			var point := takeoff.lerp(landing, progress) + Vector3.UP * (_get_jump_arc_offset(progress) + WAYPOINT_VISUAL_HEIGHT)
 			_jump_visual_mesh.surface_add_vertex(previous_point)
 			_jump_visual_mesh.surface_add_vertex(point)
 			previous_point = point
