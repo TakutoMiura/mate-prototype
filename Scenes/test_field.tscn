@@ -1,11 +1,62 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=6 format=3 uid="uid://t044k1dol0w6"]
 
-[ext_resource type="Script" path="res://Scripts/World/test_field.gd" id="1_test_field"]
-[ext_resource type="Resource" path="res://Data/Samples/sample_equipment_catalog.tres" id="2_catalog"]
+[ext_resource type="Script" uid="uid://20lhb12i5fo" path="res://Scripts/World/test_field.gd" id="1_test_field"]
+[ext_resource type="Resource" uid="uid://dhjni55jmxdp7" path="res://Data/Samples/sample_equipment_catalog.tres" id="2_catalog"]
+[ext_resource type="Script" path="res://Scripts/World/jump_connection.gd" id="3_jump_connection"]
 
-[node name="TestField" type="Node3D"]
+[sub_resource type="BoxShape3D" id="JumpLandingArea"]
+size = Vector3(8, 0.1, 7)
+
+[sub_resource type="BoxShape3D" id="JumpExitLandingArea"]
+size = Vector3(8, 0.1, 7)
+
+[node name="TestField" type="Node3D" unique_id=2074477316]
 script = ExtResource("1_test_field")
-walking_stride_length = 3.0
-walking_forward_lean_degrees = 10.0
 arm_counter_swing_ratio = 0.8
+foot_yaw_start_threshold_degrees = 40.0
+maximum_jump_height = 2.9
+jump_duration_seconds = 0.8
+jump_arc_height = 2.9
 equipment_catalog = ExtResource("2_catalog")
+
+[node name="JumpConnection" type="Node3D" parent="." groups=["jump_connections"]]
+script = ExtResource("3_jump_connection")
+takeoff_marker_path = NodePath("Takeoff")
+landing_marker_path = NodePath("Landing")
+landing_area_path = NodePath("LandingArea/CollisionShape3D")
+bidirectional = true
+
+[node name="Takeoff" type="Marker3D" parent="JumpConnection"]
+position = Vector3(0, 0, 10)
+
+[node name="Landing" type="Marker3D" parent="JumpConnection"]
+position = Vector3(0, 1.6, 16)
+
+[node name="LandingArea" type="Area3D" parent="JumpConnection"]
+position = Vector3(0, 1.6, 16)
+collision_layer = 4
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="JumpConnection/LandingArea"]
+shape = SubResource("JumpLandingArea")
+
+[node name="JumpConnectionExit" type="Node3D" parent="." groups=["jump_connections"]]
+script = ExtResource("3_jump_connection")
+takeoff_marker_path = NodePath("Takeoff")
+landing_marker_path = NodePath("Landing")
+landing_area_path = NodePath("LandingArea/CollisionShape3D")
+bidirectional = false
+
+[node name="Takeoff" type="Marker3D" parent="JumpConnectionExit"]
+position = Vector3(0, 1.6, 19)
+
+[node name="Landing" type="Marker3D" parent="JumpConnectionExit"]
+position = Vector3(0, 0, 25)
+
+[node name="LandingArea" type="Area3D" parent="JumpConnectionExit"]
+position = Vector3(0, 0, 25)
+collision_layer = 4
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="JumpConnectionExit/LandingArea"]
+shape = SubResource("JumpExitLandingArea")

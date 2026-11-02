@@ -91,6 +91,8 @@ var _turn_debug_mesh: ImmediateMesh
 var _turn_debug_instance: MeshInstance3D
 var _turn_debug_material: StandardMaterial3D
 var _turn_debug_labels: Array[Label3D] = []
+var _jump_jet_meshes: Array[MeshInstance3D] = []
+var _jump_jet_material: StandardMaterial3D
 
 
 func configure(
@@ -112,6 +114,29 @@ func get_status_bounds_corners() -> Array[Vector3]:
 
 func is_alive() -> bool:
 	return _unit_state != null and float(_unit_state.get('current_hp')) > 0.0
+
+
+func set_jump_jet_intensity(intensity: float) -> void:
+	if _jump_jet_meshes.is_empty():
+		_jump_jet_material = StandardMaterial3D.new()
+		_jump_jet_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_jump_jet_material.emission_enabled = true
+		_jump_jet_material.emission = Color("#FFB24A")
+		for side in [-1.0, 1.0]:
+			var jet := MeshInstance3D.new()
+			jet.name = "JumpBoosterFlash"
+			var mesh := SphereMesh.new()
+			mesh.radius = 0.12
+			mesh.height = 0.24
+			jet.mesh = mesh
+			jet.position = Vector3(side * 0.18, 1.35, -0.46)
+			jet.material_override = _jump_jet_material
+			add_child(jet)
+			_jump_jet_meshes.append(jet)
+	var visible_intensity := clampf(intensity, 0.0, 1.0)
+	for jet in _jump_jet_meshes:
+		jet.visible = visible_intensity > 0.0
+		jet.scale = Vector3.ONE * visible_intensity
 
 
 func set_walking(active: bool, forward_speed: float = 2.5) -> void:

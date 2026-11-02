@@ -1,5 +1,6 @@
 # Godot editor cache, imported assets, and generated metadata
 .godot/
+.godot-user-data/
 
 # Godot export output
 /android/

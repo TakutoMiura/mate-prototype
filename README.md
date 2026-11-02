@@ -7,7 +7,23 @@ Godotで開発する、小隊指揮型リアルタイム戦術ゲームのプロ
 - Godot Engine 4.7 系
 - プロジェクト設定: [`project.godot`](project.godot)
 
-プロジェクトをGodotで開き、実行してください。現在はサンプルデータを使ったMATE運用画面と、各小隊3機・計9機をResource定義から組み立てた3Dテストフィールドを表示します。小隊を選択し、地面を左クリックするとウェイポイントを設定、Shift＋左クリックで経路末尾へ追加して、平面移動・停止旋回と機械的な歩行モーションを確認できます。停止旋回中はルート位置を保ち、接地足の誤差に応じて片脚ずつ踏み替えます。旋回モーションの基準値はTestFieldのInspectorから調整でき、Standing Turnのデバッグ表示も切り替えられます。歩行中は脚に対する腰の逆捻り、上半身のカウンター回旋、支持脚側への荷重移動を表示します。第一小隊は棒人間モデル、第二小隊は胸部を前へ張り出した簡易箱メカモデルで、両者は同じ歩行ロジックを使います。ウェイポイント命令は小隊ごとに独立しており、比較時は各小隊へ個別に同等の移動指示を出してください。HUDと3Dプレビューは同じ機体状態を参照し、HP・盾HP・バックユニット弾数は各定義の最大値で初期化します。障害物・ジャンプ・戦闘シミュレーションはまだ接続していません。サンプル機体・装備の性能値は表示用の暫定値です。
+プロジェクトをGodotで開き、実行してください。Windowsでリポジトリ直下の `Godot_v4.7.2-stable_win64.exe.lnk` を使う場合は、PowerShellからショートカット先を解決して起動できます。Codexの制限環境ではユーザー設定先に書き込めないため、`APPDATA` をプロジェクト内へ向けます。
+
+```powershell
+$godotShortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path (Get-Location) 'Godot_v4.7.2-stable_win64.exe.lnk'))
+$env:APPDATA = Join-Path (Get-Location).Path '.godot-user-data'
+& $godotShortcut.TargetPath --path (Get-Location).Path --editor
+```
+
+スクリプトやシーンの読み込み確認はエディタを開かずに実行できます。
+
+```powershell
+$godotShortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path (Get-Location) 'Godot_v4.7.2-stable_win64.exe.lnk'))
+$env:APPDATA = Join-Path (Get-Location).Path '.godot-user-data'
+& $godotShortcut.TargetPath --headless --path (Get-Location).Path --scene res://Scenes/test_field.tscn --quit-after 2
+```
+
+通常はサンプルデータを使ったMATE運用画面と、各小隊3機・計9機をResource定義から組み立てた3Dテストフィールドを表示します。小隊を選択し、地面を左クリックするとウェイポイントを設定、Shift＋左クリックで経路末尾へ追加して、平面移動・停止旋回と機械的な歩行モーションを確認できます。高台の着地領域をクリックすると、シーン上のジャンプ接続を通る歩行・順次ジャンプ・着地後の進軍を確認できます。停止旋回中はルート位置を保ち、接地足の誤差に応じて片脚ずつ踏み替えます。旋回モーションの基準値はTestFieldのInspectorから調整でき、Standing Turnのデバッグ表示も切り替えられます。歩行中は脚に対する腰の逆捻り、上半身のカウンター回旋、支持脚側への荷重移動を表示します。第一小隊は棒人間モデル、第二小隊は胸部を前へ張り出した簡易箱メカモデルで、両者は同じ歩行ロジックを使います。ウェイポイント命令は小隊ごとに独立しており、比較時は各小隊へ個別に同等の移動指示を出してください。HUDと3Dプレビューは同じ機体状態を参照し、HP・盾HP・バックユニット弾数は各定義の最大値で初期化します。障害物経路計画と戦闘シミュレーションはまだ接続していません。サンプル機体・装備の性能値は表示用の暫定値です。
 
 ## Codex skills
 
