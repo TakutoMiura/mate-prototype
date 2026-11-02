@@ -19,6 +19,8 @@ func _run() -> void:
 	await _check_destroyed_member(false)
 	await _check_destroyed_member(true)
 	await _check_overlapping_connections()
+	await _check_jump_path_wait()
+	await _check_landing_slot_wait()
 	await _check_walk_overlap()
 	_check_sidestep_offset()
 	if failures.is_empty():
@@ -51,12 +53,19 @@ func _check_side_jump(side: float) -> void:
 		field._mate_lateral_offsets[mates[2].get_instance_id()] = Vector3(0.0, 0.0, 0.1)
 	field._squad_headings[1] = -side * PI * 0.5
 	field._squad_waypoints[1].append(Vector3(side * 3.0, 1.6, 16.0))
+	var routes: Array[Dictionary] = field._get_squad_jump_routes(1, Vector3(side * 3.0, 1.6, 16.0), field.get_squad_point(2))
+	if routes.is_empty():
+		failures.append("side %s: jump route was not displayed" % side)
+	else:
+		var displayed_landing: Vector3 = field._jump_visual_position(routes[0], false)
+		if absf(displayed_landing.x - side * 0.94) > 0.02:
+			failures.append("side %s: displayed landing was not fitted to platform: %s" % [side, displayed_landing])
 	var jump_started := false
-	var stage_moved := false
 	var preparation_targets: Array = []
-	var original_position: Vector3 = mates[0 if side > 0.0 else 2].position
 	for frame in range(500):
 		field._process_squad_movement(FRAME_DELTA)
+		for mate in mates:
+			mate._process(FRAME_DELTA)
 		if bool(field._squad_blocked[1]):
 			failures.append("side %s: squad became BLOCKED at frame %d" % [side, frame])
 			break
@@ -66,8 +75,6 @@ func _check_side_jump(side: float) -> void:
 				preparation_targets = preparation["targets"].duplicate()
 			elif preparation_targets != preparation["targets"]:
 				failures.append("side %s: landing targets changed while clearing" % side)
-			if mates[0 if side > 0.0 else 2].position.distance_to(original_position) > 0.01:
-				stage_moved = true
 		if bool(field._squad_jump_sequences[1].get("active", false)):
 			jump_started = true
 		if jump_started and not bool(field._squad_jump_sequences[1].get("active", false)):
@@ -80,12 +87,15 @@ func _check_side_jump(side: float) -> void:
 		for mate in mates:
 			if absf(mate.position.y - 1.6) > 0.01:
 				failures.append("side %s: %s did not land on platform" % [side, mate.name])
+			for offset in [Vector3.ZERO, Vector3.RIGHT * 0.35, Vector3.LEFT * 0.35, Vector3.FORWARD * 0.35, Vector3.BACK * 0.35]:
+				var probe: Vector3 = mate.global_position + offset
+				var ray := PhysicsRayQueryParameters3D.create(probe + Vector3.UP * 0.2, probe - Vector3.UP * 0.2, 2)
+				if field.get_world_3d().direct_space_state.intersect_ray(ray).is_empty():
+					failures.append("side %s: %s lacks landing support at %s" % [side, mate.name, probe])
 			var expected_offset: Vector3 = expected_offsets.get(mate.get_instance_id(), Vector3.ZERO)
 			var actual_offset: Vector3 = field._mate_lateral_offsets.get(mate.get_instance_id(), Vector3.ZERO)
 			if not actual_offset.is_equal_approx(expected_offset):
 				failures.append("side %s: %s retained a jump preparation offset after landing" % [side, mate.name])
-	if not stage_moved:
-		failures.append("side %s: occupied landing slot was not cleared" % side)
 	if jump_started and not bool(field._squad_jump_sequences[1].get("active", false)):
 		field._squad_waypoints[1].clear()
 		field._squad_traversed_jump_connections[1].clear()
@@ -93,6 +103,8 @@ func _check_side_jump(side: float) -> void:
 		var descent_started := false
 		for frame in range(500):
 			field._process_squad_movement(FRAME_DELTA)
+			for mate in mates:
+				mate._process(FRAME_DELTA)
 			if bool(field._squad_blocked[1]):
 				failures.append("side %s: descent became BLOCKED at frame %d" % [side, frame])
 				break
@@ -168,10 +180,10 @@ func _check_preparation_route_lock() -> void:
 	await physics_frame
 	var mates: Array = field._squad_mates[1]
 	for i in range(mates.size()):
-		mates[i].position = Vector3(9.000005 + (i - 1) * 2.7, 0.04, 16.0)
-		mates[i].rotation.y = -PI * 0.5
-	field._squad_headings[1] = -PI * 0.5
-	var waypoint := Vector3(-10.0, 0.0, 16.0)
+		mates[i].position = Vector3(0.0, 0.04, 9.499995 + (i - 1) * 2.7)
+		mates[i].rotation.y = 0.0
+	field._squad_headings[1] = 0.0
+	var waypoint := Vector3(0.0, 0.0, 22.0)
 	field._squad_waypoints[1].append(waypoint)
 	field._process_squad_movement(FRAME_DELTA)
 	var preparation: Dictionary = field._squad_jump_preparations[1]
@@ -180,7 +192,7 @@ func _check_preparation_route_lock() -> void:
 	else:
 		var targets: Array = preparation["targets"].duplicate()
 		for mate in mates:
-			mate.position.x -= 1.0
+			mate.position.z += 1.0
 		var recalculated_route: Dictionary = field._get_squad_jump_route(1, waypoint, field._get_squad_movement_point(2))
 		if not recalculated_route.is_empty():
 			failures.append("jump preparation: route-lock fixture did not move beyond the takeoff")
@@ -285,6 +297,71 @@ func _check_overlapping_connections() -> void:
 	route = field._find_jump_route(target, start, [])
 	if not bool(route.get("blocked", false)) or not String(route.get("blocked_reason", "")).contains("direction"):
 		failures.append("jump routing: forbidden direction did not report the correct reason")
+	field.queue_free()
+	await process_frame
+
+
+func _check_jump_path_wait() -> void:
+	var field := _new_field()
+	await physics_frame
+	var mates: Array = field._squad_mates[1]
+	for i in range(mates.size()):
+		mates[i].position = Vector3(9.000005 + (i - 1) * 2.7, 0.04, 16.0)
+		mates[i].rotation.y = -PI * 0.5
+	field._squad_headings[1] = -PI * 0.5
+	var blocker: MatePreview = field._squad_mates[0][0]
+	blocker.position = Vector3(5.75, 1.6, 16.0)
+	field._squad_waypoints[1].append(Vector3(3.0, 1.6, 16.0))
+	var starting_positions: Array[Vector3] = []
+	for mate in mates:
+		starting_positions.append(mate.position)
+	for frame in range(30):
+		field._process_squad_movement(FRAME_DELTA)
+	if bool(field._squad_blocked[1]) or not bool(field._squad_jump_sequences[1].get("active", false)):
+		failures.append("jump path: moving unit did not wait for the occupied arc")
+	for i in range(mates.size()):
+		if not mates[i].position.is_equal_approx(starting_positions[i]):
+			failures.append("jump path: unit moved while the arc was occupied")
+	blocker.position = Vector3(50.0, 0.04, 50.0)
+	for frame in range(500):
+		field._process_squad_movement(FRAME_DELTA)
+		if not bool(field._squad_jump_sequences[1].get("active", false)):
+			break
+	if bool(field._squad_jump_sequences[1].get("active", false)):
+		failures.append("jump path: squad did not resume after the arc cleared")
+	for mate in mates:
+		if absf(mate.position.y - 1.6) > 0.01:
+			failures.append("jump path: squad did not finish after the arc cleared")
+	field.queue_free()
+	await process_frame
+
+
+func _check_landing_slot_wait() -> void:
+	var field := _new_field()
+	await physics_frame
+	var mates: Array = field._squad_mates[1]
+	for i in range(mates.size()):
+		mates[i].position = Vector3(9.000005 + (i - 1) * 2.7, 0.04, 16.0)
+	field._squad_headings[1] = -PI * 0.5
+	var blocker: MatePreview = field._squad_mates[0][0]
+	blocker.position = Vector3(3.64, 1.6, 16.0)
+	field._squad_waypoints[1].append(Vector3(3.0, 1.6, 16.0))
+	for frame in range(10):
+		field._process_squad_movement(FRAME_DELTA)
+	if bool(field._squad_blocked[1]) or field._squad_jump_preparations[1].is_empty():
+		failures.append("landing slot: occupied target did not remain in waiting state")
+	if bool(field._squad_jump_sequences[1].get("active", false)):
+		failures.append("landing slot: jump began while another unit occupied the target")
+	blocker.position = Vector3(50.0, 0.04, 50.0)
+	var started := false
+	for frame in range(500):
+		field._process_squad_movement(FRAME_DELTA)
+		if bool(field._squad_jump_sequences[1].get("active", false)):
+			started = true
+		if started and not bool(field._squad_jump_sequences[1].get("active", false)):
+			break
+	if not started or bool(field._squad_jump_sequences[1].get("active", false)):
+		failures.append("landing slot: squad did not resume after the target cleared")
 	field.queue_free()
 	await process_frame
 
