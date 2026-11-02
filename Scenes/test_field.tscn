@@ -1,14 +1,20 @@
-[gd_scene load_steps=6 format=3 uid="uid://t044k1dol0w6"]
+[gd_scene load_steps=8 format=3 uid="uid://t044k1dol0w6"]
 
 [ext_resource type="Script" uid="uid://20lhb12i5fo" path="res://Scripts/World/test_field.gd" id="1_test_field"]
 [ext_resource type="Resource" uid="uid://dhjni55jmxdp7" path="res://Data/Samples/sample_equipment_catalog.tres" id="2_catalog"]
 [ext_resource type="Script" path="res://Scripts/World/jump_connection.gd" id="3_jump_connection"]
 
-[sub_resource type="BoxShape3D" id="JumpLandingArea"]
+[sub_resource type="BoxShape3D" id="JumpHighlandLandingArea"]
 size = Vector3(8, 0.1, 7)
 
-[sub_resource type="BoxShape3D" id="JumpExitLandingArea"]
-size = Vector3(8, 0.1, 7)
+[sub_resource type="BoxShape3D" id="JumpFrontLandingArea"]
+size = Vector3(8, 0.1, 2)
+
+[sub_resource type="BoxShape3D" id="JumpLeftLandingArea"]
+size = Vector3(2, 0.1, 7)
+
+[sub_resource type="BoxShape3D" id="JumpRightLandingArea"]
+size = Vector3(2, 0.1, 7)
 
 [node name="TestField" type="Node3D" unique_id=2074477316]
 script = ExtResource("1_test_field")
@@ -30,33 +36,75 @@ bidirectional = true
 position = Vector3(0, 0, 10)
 
 [node name="Landing" type="Marker3D" parent="JumpConnection"]
-position = Vector3(0, 1.6, 16)
+position = Vector3(0, 1.6, 13.5)
 
 [node name="LandingArea" type="Area3D" parent="JumpConnection"]
-position = Vector3(0, 1.6, 16)
+position = Vector3(0, 1.6, 13.5)
 collision_layer = 4
 collision_mask = 0
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="JumpConnection/LandingArea"]
-shape = SubResource("JumpLandingArea")
+shape = SubResource("JumpFrontLandingArea")
 
-[node name="JumpConnectionExit" type="Node3D" parent="." groups=["jump_connections"]]
+[node name="JumpConnectionLeft" type="Node3D" parent="." groups=["jump_connections"]]
 script = ExtResource("3_jump_connection")
 takeoff_marker_path = NodePath("Takeoff")
 landing_marker_path = NodePath("Landing")
 landing_area_path = NodePath("LandingArea/CollisionShape3D")
-bidirectional = false
+bidirectional = true
 
-[node name="Takeoff" type="Marker3D" parent="JumpConnectionExit"]
-position = Vector3(0, 1.6, 19)
+[node name="Takeoff" type="Marker3D" parent="JumpConnectionLeft"]
+position = Vector3(-8.5, 0, 16)
 
-[node name="Landing" type="Marker3D" parent="JumpConnectionExit"]
-position = Vector3(0, 0, 25)
+[node name="Landing" type="Marker3D" parent="JumpConnectionLeft"]
+position = Vector3(-3, 1.6, 16)
 
-[node name="LandingArea" type="Area3D" parent="JumpConnectionExit"]
-position = Vector3(0, 0, 25)
+[node name="LandingArea" type="Area3D" parent="JumpConnectionLeft"]
+position = Vector3(-3, 1.6, 16)
 collision_layer = 4
 collision_mask = 0
 
-[node name="CollisionShape3D" type="CollisionShape3D" parent="JumpConnectionExit/LandingArea"]
-shape = SubResource("JumpExitLandingArea")
+[node name="CollisionShape3D" type="CollisionShape3D" parent="JumpConnectionLeft/LandingArea"]
+shape = SubResource("JumpLeftLandingArea")
+
+[node name="JumpConnectionRight" type="Node3D" parent="." groups=["jump_connections"]]
+script = ExtResource("3_jump_connection")
+takeoff_marker_path = NodePath("Takeoff")
+landing_marker_path = NodePath("Landing")
+landing_area_path = NodePath("LandingArea/CollisionShape3D")
+bidirectional = true
+
+[node name="Takeoff" type="Marker3D" parent="JumpConnectionRight"]
+position = Vector3(8.5, 0, 16)
+
+[node name="Landing" type="Marker3D" parent="JumpConnectionRight"]
+position = Vector3(3, 1.6, 16)
+
+[node name="LandingArea" type="Area3D" parent="JumpConnectionRight"]
+position = Vector3(3, 1.6, 16)
+collision_layer = 4
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="JumpConnectionRight/LandingArea"]
+shape = SubResource("JumpRightLandingArea")
+
+[node name="JumpConnectionStepHighland" type="Node3D" parent="." groups=["jump_connections"]]
+script = ExtResource("3_jump_connection")
+takeoff_marker_path = NodePath("Takeoff")
+landing_marker_path = NodePath("Landing")
+landing_area_path = NodePath("LandingArea/CollisionShape3D")
+bidirectional = true
+
+[node name="Takeoff" type="Marker3D" parent="JumpConnectionStepHighland"]
+position = Vector3(0, 1.6, 19)
+
+[node name="Landing" type="Marker3D" parent="JumpConnectionStepHighland"]
+position = Vector3(0, 3.2, 26)
+
+[node name="LandingArea" type="Area3D" parent="JumpConnectionStepHighland"]
+position = Vector3(0, 3.2, 26)
+collision_layer = 4
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="JumpConnectionStepHighland/LandingArea"]
+shape = SubResource("JumpHighlandLandingArea")
