@@ -537,6 +537,24 @@ func _get_squad_jump_route(index: int, waypoint: Vector3, current_position: Vect
 	return _find_jump_route(waypoint, current_position, connections_for_waypoint)
 
 
+func _get_squad_jump_routes(index: int, waypoint: Vector3, current_position: Vector3) -> Array[Dictionary]:
+	var routes: Array[Dictionary] = []
+	if index < 0 or index >= _squad_traversed_jump_connections.size():
+		return routes
+	var traversed_connections: Array = _squad_traversed_jump_connections[index].get(waypoint, [])
+	var planned_connections: Array = traversed_connections.duplicate()
+	var planning_position := current_position
+	var maximum_route_jumps := get_tree().get_nodes_in_group("jump_connections").size()
+	for _jump_index in range(maximum_route_jumps):
+		var jump_route := _find_jump_route(waypoint, planning_position, planned_connections)
+		if jump_route.is_empty() or bool(jump_route.get("blocked", false)):
+			break
+		routes.append(jump_route)
+		planned_connections.append(jump_route["connection"])
+		planning_position = jump_route["landing"]
+	return routes
+
+
 func _remove_completed_jump_waypoint(index: int, waypoint: Vector3) -> void:
 	_squad_traversed_jump_connections[index].erase(waypoint)
 
@@ -738,13 +756,12 @@ func _refresh_waypoint_visual() -> void:
 		var waypoint: Vector3 = route[index]
 		var marker_center: Vector3 = waypoint + Vector3(0, WAYPOINT_VISUAL_HEIGHT, 0)
 		if index > 0:
-			var jump_route := _get_squad_jump_route(selected_index, waypoint, movement_point)
-			if not jump_route.is_empty() and not bool(jump_route.get("blocked", false)):
-				var takeoff: Vector3 = jump_route["takeoff"] + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
-				var landing: Vector3 = jump_route["landing"] + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
+			var jump_routes := _get_squad_jump_routes(selected_index, waypoint, movement_point)
+			if not jump_routes.is_empty():
 				_waypoint_visual_mesh.surface_add_vertex(previous_point)
-				_waypoint_visual_mesh.surface_add_vertex(takeoff)
-				_waypoint_visual_mesh.surface_add_vertex(landing)
+				for jump_route in jump_routes:
+					_waypoint_visual_mesh.surface_add_vertex(jump_route["takeoff"] + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
+					_waypoint_visual_mesh.surface_add_vertex(jump_route["landing"] + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 				_waypoint_visual_mesh.surface_add_vertex(marker_center)
 			else:
 				_waypoint_visual_mesh.surface_add_vertex(previous_point)
@@ -781,7 +798,7 @@ func _refresh_waypoint_origin_visual() -> void:
 		return
 	var first_waypoint: Vector3 = route[0]
 	var squad_index := _selected_squad_number - 1
-	var jump_route := _get_squad_jump_route(
+	var jump_routes := _get_squad_jump_routes(
 		squad_index,
 		first_waypoint,
 		_get_squad_movement_point(_selected_squad_number)
@@ -789,11 +806,10 @@ func _refresh_waypoint_origin_visual() -> void:
 	var route_origin: Vector3 = get_squad_point(_selected_squad_number) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
 	_waypoint_origin_mesh.surface_begin(Mesh.PRIMITIVE_LINES, _waypoint_visual_material)
 	_waypoint_origin_mesh.surface_add_vertex(route_origin)
-	if not jump_route.is_empty() and not bool(jump_route.get("blocked", false)):
-		var takeoff: Vector3 = jump_route["takeoff"] + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
-		var landing: Vector3 = jump_route["landing"] + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
-		_waypoint_origin_mesh.surface_add_vertex(takeoff)
-		_waypoint_origin_mesh.surface_add_vertex(landing)
+	if not jump_routes.is_empty():
+		for jump_route in jump_routes:
+			_waypoint_origin_mesh.surface_add_vertex(jump_route["takeoff"] + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
+			_waypoint_origin_mesh.surface_add_vertex(jump_route["landing"] + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 		_waypoint_origin_mesh.surface_add_vertex(first_waypoint + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 	else:
 		_waypoint_origin_mesh.surface_add_vertex(first_waypoint + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
@@ -812,9 +828,11 @@ func _refresh_jump_visual() -> void:
 	var jump_routes: Array[Dictionary] = []
 	var movement_point := _get_squad_movement_point(_selected_squad_number)
 	for waypoint in route:
-		var jump_route := _get_squad_jump_route(_selected_squad_number - 1, waypoint, movement_point)
-		if not jump_route.is_empty() and not bool(jump_route.get("blocked", false)):
-			jump_routes.append(jump_route)
+		jump_routes.append_array(_get_squad_jump_routes(
+			_selected_squad_number - 1,
+			waypoint,
+			movement_point
+		))
 		movement_point = waypoint
 	if jump_routes.is_empty():
 		return
