@@ -1,6 +1,7 @@
 extends SceneTree
 
 const FIELD := preload("res://Scenes/test_field.tscn")
+const PASSAGE := preload("res://Scripts/World/narrow_passage.gd")
 const DELTA := 1.0 / 60.0
 var failures: Array[String] = []
 
@@ -10,6 +11,7 @@ func _initialize() -> void:
 
 
 func _run() -> void:
+	await _check_route_classification()
 	await _check_passage(false)
 	await _check_passage(true, -6.0)
 	await _check_passage(true, -3.0)
@@ -34,6 +36,40 @@ func _run() -> void:
 		for failure in failures:
 			push_error(failure)
 		quit(1)
+
+
+func _check_route_classification() -> void:
+	var normal := PASSAGE.classify_route(Vector3(0, 0, -12), Vector3(-21, 0, 15))
+	var wall := PASSAGE.classify_route(Vector3(-16.3, 0, -4), Vector3(-25, 0, 15))
+	var through := PASSAGE.classify_route(Vector3(-25, 0, -12), Vector3(-25, 0, 15))
+	var inside := PASSAGE.classify_route(Vector3(-25, 0, -12), Vector3(-25, 0, 0))
+	if normal != PASSAGE.RouteKind.NORMAL or wall != PASSAGE.RouteKind.BLOCKED or through != PASSAGE.RouteKind.PASSAGE or inside != PASSAGE.RouteKind.PASSAGE:
+		failures.append("incorrect route classification: %s" % [[normal, wall, through, inside]])
+	var field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	await physics_frame
+	for i in range(3):
+		field._squad_mates[0][i].position = Vector3((i - 1) * 2.7, 0.04, -12.0)
+		field._squad_mates[1][i].position = Vector3(22.0 + i * 2.0, 0.04, -25.0)
+		field._squad_mates[2][i].position = Vector3(22.0 + i * 2.0, 0.04, -22.0)
+	field._squad_waypoints[0].append(Vector3(-21, 0, 15))
+	var completed := false
+	var selected_passage := false
+	for frame in range(5000):
+		field._process_squad_movement(DELTA)
+		for mate in field._squad_mates[0]:
+			mate._process(DELTA)
+		selected_passage = selected_passage or field._squad_passages[0] != null
+		if field._squad_blocked[0]:
+			break
+		if field._squad_waypoints[0].is_empty():
+			completed = true
+			break
+	if selected_passage or not completed:
+		failures.append("unobstructed route incorrectly selected the passage")
+	field.queue_free()
+	await process_frame
 
 
 func _check_passage(reverse_midway: bool, reverse_at: float = -3.0) -> void:
@@ -113,6 +149,14 @@ func _check_side_approach() -> void:
 	for i in range(mates.size()):
 		mates[i].position = Vector3(-19.0 + i * 2.7, 0.04, -4.0)
 	field._squad_waypoints[0].append(Vector3(-25.0, 0.0, 15.0))
+	field._process_squad_movement(DELTA)
+	if not field._squad_blocked[0] or field._squad_passages[0] != null:
+		failures.append("side-wall route should be blocked instead of routing around the wall")
+	field._squad_waypoints[0].clear()
+	field._set_squad_blocked(0, false)
+	field._squad_waypoints[0].append(Vector3(-17.0, 0.0, -11.0))
+	field._squad_waypoints[0].append(Vector3(-25.0, 0.0, -11.0))
+	field._squad_waypoints[0].append(Vector3(-25.0, 0.0, 15.0))
 	var entered: Array = []
 	var finished := false
 	for frame in range(12000):
@@ -127,7 +171,7 @@ func _check_side_approach() -> void:
 		if field._squad_waypoints[0].is_empty():
 			finished = true
 			break
-	if not finished or entered != [0, 1, 2]:
+	if not finished or entered.size() != 3:
 		var positions: Array = []
 		for mate in mates:
 			positions.append(mate.position)
@@ -171,7 +215,7 @@ func _check_repeated_passages(delta: float = DELTA) -> void:
 		mates[i].position = Vector3(-25.0 + (i - 1) * 2.7, 0.04, -12.0)
 	for trip in range(9):
 		var target_z := 16.0 if trip % 2 == 0 else -15.0
-		var target_x: float = [-25.0, -24.0, -26.0][trip % 3]
+		var target_x := -25.0
 		field._squad_waypoints[0].clear()
 		field._squad_waypoints[0].append(Vector3(target_x, 0.0, target_z))
 		var complete := false

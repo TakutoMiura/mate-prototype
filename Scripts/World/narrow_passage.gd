@@ -9,6 +9,7 @@ const BODY_RADIUS := 0.35
 const CLEARANCE := 0.12
 const UNIT_CLEARANCE := 1.0
 const POINT_EPSILON := 0.04
+enum RouteKind { NORMAL, PASSAGE, BLOCKED }
 
 var field: Node3D
 var waypoint: Vector3
@@ -85,17 +86,29 @@ func _init(owner: Node3D, destination: Vector3, squad: Array, previous = null) -
 			break
 
 
-static func should_start(squad_point: Vector3, destination: Vector3) -> bool:
-	# The test passage is selected when a waypoint lies beyond one end and near
-	# its centre line, while the squad is on the other side of its midpoint.
-	if absf(destination.x - CENTER_X) < 0.5 and destination.z > FRONT_Z and destination.z < BACK_Z:
+static func classify_route(squad_point: Vector3, destination: Vector3) -> RouteKind:
+	# This test passage has two 4-unit-wide walls. Classify the player's actual
+	# segment, not merely the area containing its destination.
+	var start := Vector2(squad_point.x, squad_point.z)
+	var finish := Vector2(destination.x, destination.z)
+	var west_wall := Rect2(Vector2(CENTER_X - 4.5, FRONT_Z), Vector2(4.0, BACK_Z - FRONT_Z))
+	var east_wall := Rect2(Vector2(CENTER_X + 0.5, FRONT_Z), Vector2(4.0, BACK_Z - FRONT_Z))
+	if _segment_intersects_rect(start, finish, west_wall) or _segment_intersects_rect(start, finish, east_wall):
+		return RouteKind.BLOCKED
+	var passage := Rect2(Vector2(CENTER_X - 0.5, FRONT_Z), Vector2(1.0, BACK_Z - FRONT_Z))
+	if _segment_intersects_rect(start, finish, passage):
+		return RouteKind.PASSAGE
+	return RouteKind.NORMAL
+
+
+static func _segment_intersects_rect(start: Vector2, finish: Vector2, rect: Rect2) -> bool:
+	if rect.has_point(start) or rect.has_point(finish):
 		return true
-	if absf(destination.x - CENTER_X) > 4.5:
-		return false
-	if absf(squad_point.x - CENTER_X) < 0.5 and squad_point.z > FRONT_Z and squad_point.z < BACK_Z:
-		return destination.z > BACK_Z + BODY_RADIUS or destination.z < FRONT_Z - BODY_RADIUS
-	var middle := (FRONT_Z + BACK_Z) * 0.5
-	return (destination.z > BACK_Z + BODY_RADIUS and squad_point.z < middle) or (destination.z < FRONT_Z - BODY_RADIUS and squad_point.z > middle)
+	var corners := [rect.position, Vector2(rect.end.x, rect.position.y), rect.end, Vector2(rect.position.x, rect.end.y)]
+	for i in range(corners.size()):
+		if Geometry2D.segment_intersects_segment(start, finish, corners[i], corners[(i + 1) % corners.size()]) != null:
+			return true
+	return false
 
 
 func process(delta: float) -> bool:
@@ -266,12 +279,8 @@ func _segment_clear(mate, from: Vector3, to: Vector3, include_units: bool, avoid
 		var passage := Rect2(Vector2(CENTER_X - 0.5, FRONT_Z), Vector2(1.0, BACK_Z - FRONT_Z))
 		var start := Vector2(from.x, from.z)
 		var finish := Vector2(to.x, to.z)
-		if passage.has_point(start) or passage.has_point(finish):
+		if _segment_intersects_rect(start, finish, passage):
 			return false
-		var corners := [passage.position, Vector2(passage.end.x, passage.position.y), passage.end, Vector2(passage.position.x, passage.end.y)]
-		for i in range(corners.size()):
-			if Geometry2D.segment_intersects_segment(start, finish, corners[i], corners[(i + 1) % corners.size()]) != null:
-				return false
 	var shape := CapsuleShape3D.new()
 	shape.radius = BODY_RADIUS
 	shape.height = field.WALK_BODY_HEIGHT

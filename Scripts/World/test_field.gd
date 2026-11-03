@@ -356,11 +356,26 @@ func _process_squad_movement(delta: float) -> bool:
 			continue
 		var passage = _squad_passages[index]
 		var passage_waypoint: Vector3 = route[0]
-		if passage != null and passage.waypoint != passage_waypoint:
-			passage = NARROW_PASSAGE_SCRIPT.new(self, passage_waypoint, living_mates, passage)
-			_squad_passages[index] = passage
-		elif passage == null and NARROW_PASSAGE_SCRIPT.should_start(get_squad_point(index + 1), passage_waypoint):
-			passage = NARROW_PASSAGE_SCRIPT.new(self, passage_waypoint, living_mates)
+		if passage == null or passage.waypoint != passage_waypoint:
+			var member_inside := false
+			var route_origin := get_squad_point(index + 1)
+			if passage != null:
+				for mate in living_mates:
+					if absf(mate.position.x - NARROW_PASSAGE_SCRIPT.CENTER_X) < 0.5 and mate.position.z > NARROW_PASSAGE_SCRIPT.FRONT_Z and mate.position.z < NARROW_PASSAGE_SCRIPT.BACK_Z:
+						member_inside = true
+						route_origin = mate.position
+						break
+			var route_kind: int = NARROW_PASSAGE_SCRIPT.RouteKind.NORMAL
+			if absf(_get_squad_movement_point(index + 1).y - passage_waypoint.y) < 0.1:
+				route_kind = NARROW_PASSAGE_SCRIPT.classify_route(route_origin, passage_waypoint)
+			if route_kind == NARROW_PASSAGE_SCRIPT.RouteKind.BLOCKED:
+				_squad_passages[index] = null
+				_set_squad_blocked(index, true, "the specified route crosses a narrow passage wall")
+				continue
+			if route_kind == NARROW_PASSAGE_SCRIPT.RouteKind.PASSAGE or member_inside:
+				passage = NARROW_PASSAGE_SCRIPT.new(self, passage_waypoint, living_mates, passage)
+			else:
+				passage = null
 			_squad_passages[index] = passage
 		if passage != null:
 			for mate in living_mates:
