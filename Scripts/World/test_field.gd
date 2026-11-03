@@ -6,6 +6,7 @@ signal view_changed
 signal tactical_pause_changed(is_paused: bool)
 
 const MATE_UNIT_STATE_SCRIPT := preload("res://Scripts/Data/mate_unit_state.gd")
+const NARROW_PASSAGE_SCRIPT := preload("res://Scripts/World/narrow_passage.gd")
 const SQUAD_COLORS := [Color("#D39B4C"), Color("#6A9AA9"), Color("#879C68")]
 const FLOOR_EXTENT := 30.0
 const SQUAD_SPACING := 12.0
@@ -95,6 +96,7 @@ var _squad_headings: Array[float] = []
 var _squad_turning_active: Array[bool] = []
 var _squad_jump_sequences: Array[Dictionary] = []
 var _squad_jump_preparations: Array[Dictionary] = []
+var _squad_passages: Array = []
 var _squad_blocked: Array[bool] = []
 var _squad_traversed_jump_connections: Array[Dictionary] = []
 var _reserved_jump_landings: Array[Vector3] = []
@@ -337,6 +339,7 @@ func _process_squad_movement(delta: float) -> bool:
 			continue
 		if route.is_empty():
 			_squad_jump_preparations[index].clear()
+			_squad_passages[index] = null
 			var recovered := _recover_squad_lateral_offsets(mates, delta)
 			any_active = any_active or recovered
 			any_positions_moved = any_positions_moved or recovered
@@ -350,6 +353,33 @@ func _process_squad_movement(delta: float) -> bool:
 			_squad_jump_preparations[index].clear()
 			_squad_traversed_jump_connections[index].clear()
 			route_changed = true
+			continue
+		var passage = _squad_passages[index]
+		var passage_waypoint: Vector3 = route[0]
+		if passage != null and passage.waypoint != passage_waypoint:
+			passage = NARROW_PASSAGE_SCRIPT.new(self, passage_waypoint, living_mates, passage)
+			_squad_passages[index] = passage
+		elif passage == null and NARROW_PASSAGE_SCRIPT.should_start(get_squad_point(index + 1), passage_waypoint):
+			passage = NARROW_PASSAGE_SCRIPT.new(self, passage_waypoint, living_mates)
+			_squad_passages[index] = passage
+		if passage != null:
+			for mate in living_mates:
+				_mate_lateral_offsets.erase(mate.get_instance_id())
+			var passage_complete: bool = passage.process(delta)
+			if not passage.failed_reason.is_empty():
+				_set_squad_blocked(index, true, passage.failed_reason)
+			else:
+				_set_squad_blocked(index, false)
+			if passage_complete:
+				_squad_passages[index] = null
+				_squad_headings[index] = living_mates[0].rotation.y
+				_squad_turning_active[index] = false
+				if passage.stop_inside:
+					route.pop_front()
+					_remove_completed_jump_waypoint(index, passage_waypoint)
+					route_changed = true
+			any_active = true
+			any_positions_moved = true
 			continue
 		var movement_budget := squad_move_speed * delta
 		while not route.is_empty():
@@ -1667,6 +1697,29 @@ func _add_jump_platform(platform_name: String, size: Vector3, position: Vector3,
 	add_child(platform_body)
 
 
+func _add_corridor_wall(wall_name: String, size: Vector3, position: Vector3, material: Material) -> void:
+	var wall := MeshInstance3D.new()
+	wall.name = wall_name
+	var wall_mesh := BoxMesh.new()
+	wall_mesh.size = size
+	wall.mesh = wall_mesh
+	wall.position = position
+	wall.material_override = material
+	add_child(wall)
+
+	var wall_body := StaticBody3D.new()
+	wall_body.name = "%sCollision" % wall_name
+	wall_body.collision_layer = 1
+	wall_body.collision_mask = 0
+	wall_body.position = position
+	var wall_shape := CollisionShape3D.new()
+	var wall_box := BoxShape3D.new()
+	wall_box.size = size
+	wall_shape.shape = wall_box
+	wall_body.add_child(wall_shape)
+	add_child(wall_body)
+
+
 func _build_ground() -> void:
 	var ground := MeshInstance3D.new()
 	ground.name = "TestFieldGround"
@@ -1695,6 +1748,12 @@ func _build_ground() -> void:
 	highland_material.albedo_color = Color("#34464B")
 	highland_material.roughness = 0.94
 	_add_jump_platform("JumpHighland", Vector3(8.0, 0.4, 7.0), Vector3(0.0, 3.0, 26.0), highland_material)
+
+	var corridor_material := StandardMaterial3D.new()
+	corridor_material.albedo_color = Color("#58666A")
+	corridor_material.roughness = 0.9
+	_add_corridor_wall("NarrowPassageWestWall", Vector3(4.0, 3.0, 16.0), Vector3(-27.5, 1.5, 1.0), corridor_material)
+	_add_corridor_wall("NarrowPassageEastWall", Vector3(4.0, 3.0, 16.0), Vector3(-22.5, 1.5, 1.0), corridor_material)
 
 	var grid_mesh := ImmediateMesh.new()
 	var grid_material := StandardMaterial3D.new()
@@ -1790,6 +1849,7 @@ func _build_sample_mates() -> void:
 		_squad_turning_active.append(false)
 		_squad_jump_sequences.append({"active": false})
 		_squad_jump_preparations.append({})
+		_squad_passages.append(null)
 		_squad_blocked.append(false)
 		_squad_traversed_jump_connections.append({})
 		var squad_states: Array[Resource] = []
