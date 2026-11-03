@@ -62,23 +62,13 @@ func _init(owner: Node3D, destination: Vector3, squad: Array, previous = null) -
 			return direction * a.position.z > direction * b.position.z
 		return a.position.distance_squared_to(entry) < b.position.distance_squared_to(entry)
 	)
-	var spacing := UNIT_CLEARANCE + 0.1
-	var half_length := float(maxi(living.size() - 1, 0)) * spacing * 0.5
-	var stop_center := clampf(destination.z, FRONT_Z + BODY_RADIUS + CLEARANCE + half_length, BACK_Z - BODY_RADIUS - CLEARANCE - half_length)
 	for i in range(living.size()):
 		var mate = living[i]
 		var already_out: bool = not stop_inside and direction * (mate.position.z - exit_z) > BODY_RADIUS
 		var inside: bool = mate.position.z > FRONT_Z and mate.position.z < BACK_Z and absf(mate.position.x - CENTER_X) < 0.5
 		var phase := 2 if already_out else (1 if inside else 0)
-		# The first two units clear opposite sides of the exit. The last unit
-		# parks farther ahead, leaving a clear route between those positions.
-		var slot_offsets := [-2.2, 2.2, 0.0]
-		var slot := Vector3(CENTER_X + slot_offsets[i], mate.position.y, exit_point.z)
-		if i == 2:
-			slot.z += direction * spacing
-		if stop_inside:
-			slot = Vector3(CENTER_X, mate.position.y, stop_center + direction * (half_length - float(i) * spacing))
-		members.append({"mate": mate, "phase": phase, "path": [], "slot": slot, "retry": 0.0, "planned_target": null})
+		members.append({"mate": mate, "phase": phase, "path": [], "slot": Vector3.ZERO, "retry": 0.0, "planned_target": null})
+	_assign_slots()
 	for state in members:
 		if int(state["phase"]) == 2:
 			continue
@@ -90,6 +80,50 @@ func _init(owner: Node3D, destination: Vector3, squad: Array, previous = null) -
 		if not _segment_clear(mate, start, finish, false, false):
 			failed_reason = "passage is blocked by terrain"
 			break
+
+
+func _assign_slots() -> void:
+	var spacing := UNIT_CLEARANCE + 0.1
+	if stop_inside:
+		var half_length := float(maxi(members.size() - 1, 0)) * spacing * 0.5
+		var stop_center := clampf(waypoint.z, FRONT_Z + BODY_RADIUS + CLEARANCE + half_length, BACK_Z - BODY_RADIUS - CLEARANCE - half_length)
+		for i in range(members.size()):
+			var mate = members[i]["mate"]
+			members[i]["slot"] = Vector3(CENTER_X, mate.position.y, stop_center + direction * (half_length - float(i) * spacing))
+		return
+	var slots: Array[Vector3] = [
+		Vector3(CENTER_X - 2.2, 0.0, exit_point.z),
+		Vector3(CENTER_X + 2.2, 0.0, exit_point.z),
+		Vector3(CENTER_X, 0.0, exit_point.z + direction * spacing),
+	]
+	# Units already outside retain the nearest free position, avoiding a
+	# circular wait when an earlier unit's target is occupied by a later one.
+	var already_out: Array = []
+	for state in members:
+		if int(state["phase"]) == 2:
+			already_out.append(state)
+	while not already_out.is_empty():
+		var best_state := 0
+		var best_slot := 0
+		var best_distance := INF
+		for i in range(already_out.size()):
+			for j in range(slots.size()):
+				var distance: float = already_out[i]["mate"].position.distance_squared_to(slots[j])
+				if distance < best_distance:
+					best_distance = distance
+					best_state = i
+					best_slot = j
+		var state: Dictionary = already_out.pop_at(best_state)
+		var slot: Vector3 = slots.pop_at(best_slot)
+		slot.y = state["mate"].position.y
+		state["slot"] = slot
+	for state in members:
+		if int(state["phase"]) == 2:
+			continue
+		var mate = state["mate"]
+		var slot: Vector3 = slots.pop_front()
+		slot.y = mate.position.y
+		state["slot"] = slot
 
 
 static func classify_route(squad_point: Vector3, destination: Vector3) -> RouteKind:
@@ -200,9 +234,9 @@ func process(delta: float) -> bool:
 			continue
 		var phase: int = state["phase"]
 		# Do not let the next unit occupy the exit while its predecessor is
-		# still moving aside. Apply the same ordering to units already outside
-		# when a passage route is replanned.
-		if not stop_inside and i > 0 and phase in [1, 2]:
+		# still moving aside. Units already outside may move independently so
+		# they can clear each other's parking targets after replanning.
+		if not stop_inside and i > 0 and phase == 1:
 			var predecessor: Dictionary = members[i - 1]
 			var predecessor_mate = predecessor["mate"]
 			if is_instance_valid(predecessor_mate) and predecessor_mate.is_alive() and int(predecessor["phase"]) == 2:
@@ -327,6 +361,7 @@ func resume_from_wait() -> void:
 	members.sort_custom(func(a, b):
 		return a["mate"].position.distance_squared_to(entry) < b["mate"].position.distance_squared_to(entry)
 	)
+	_assign_slots()
 	for state in members:
 		state["path"] = []
 		state["planned_target"] = null

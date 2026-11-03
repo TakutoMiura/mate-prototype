@@ -107,6 +107,7 @@ var _squad_traversed_jump_connections: Array[Dictionary] = []
 var _reserved_jump_landings: Array[Vector3] = []
 var _mate_lateral_offsets: Dictionary = {}
 var _mate_yield_holds: Dictionary = {}
+var _yielded_mates: Dictionary = {}
 var _jump_visual_fit_cache: Dictionary = {}
 var _waypoint_visual: MeshInstance3D
 var _waypoint_visual_mesh: ImmediateMesh
@@ -355,6 +356,10 @@ func _process_squad_movement(delta: float) -> bool:
 			any_active = true
 			any_positions_moved = true
 			continue
+		if not route.is_empty() and _squad_blocked[index] and _recover_blocked_yield_offsets(mates, delta):
+			any_active = true
+			any_positions_moved = true
+			continue
 		if route.is_empty():
 			_squad_jump_preparations[index].clear()
 			_squad_passages[index] = null
@@ -381,7 +386,8 @@ func _process_squad_movement(delta: float) -> bool:
 			for mate in living_mates:
 				if absf(mate.position.x - NARROW_PASSAGE_SCRIPT.CENTER_X) < 0.5 and mate.position.z > NARROW_PASSAGE_SCRIPT.FRONT_Z and mate.position.z < NARROW_PASSAGE_SCRIPT.BACK_Z:
 					member_inside = true
-					route_origin = mate.position
+					if absf(route_origin.x - NARROW_PASSAGE_SCRIPT.CENTER_X) >= 0.5 or route_origin.z <= NARROW_PASSAGE_SCRIPT.FRONT_Z or route_origin.z >= NARROW_PASSAGE_SCRIPT.BACK_Z:
+						route_origin = mate.position
 					break
 			var route_kind: int = NARROW_PASSAGE_SCRIPT.RouteKind.NORMAL
 			var correction: Dictionary = {}
@@ -420,6 +426,7 @@ func _process_squad_movement(delta: float) -> bool:
 				route_changed = true
 			for mate in living_mates:
 				_mate_lateral_offsets.erase(mate.get_instance_id())
+				_yielded_mates.erase(mate.get_instance_id())
 			var passage_complete: bool = passage.process(delta)
 			if not passage.failed_reason.is_empty():
 				_set_squad_blocked(index, true, passage.failed_reason)
@@ -562,6 +569,9 @@ func _process_squad_movement(delta: float) -> bool:
 			var any_yield_moved := false
 			var blocking_reason := ""
 			for mate in living_mates:
+				if _yield_hold_active(mate.get_instance_id()):
+					mate.set_walking(false)
+					continue
 				var move_result := _get_member_walk_displacement(mate, displacement, lateral)
 				var member_displacement: Vector3 = move_result["displacement"]
 				if member_displacement.is_zero_approx():
@@ -651,6 +661,7 @@ func _recover_squad_lateral_offsets(mates: Array[MatePreview], delta: float) -> 
 		var current_offset: Vector3 = _mate_lateral_offsets.get(mate_id, Vector3.ZERO)
 		if current_offset.is_zero_approx():
 			_mate_lateral_offsets.erase(mate_id)
+			_yielded_mates.erase(mate_id)
 			continue
 		var return_move := -current_offset.normalized() * minf(current_offset.length(), squad_move_speed * delta)
 		if not _can_walk_displacement(mate, return_move):
@@ -660,10 +671,19 @@ func _recover_squad_lateral_offsets(mates: Array[MatePreview], delta: float) -> 
 		var remaining_offset := current_offset + return_move
 		if remaining_offset.is_zero_approx():
 			_mate_lateral_offsets.erase(mate_id)
+			_yielded_mates.erase(mate_id)
 		else:
 			_mate_lateral_offsets[mate_id] = remaining_offset
 		any_moved = true
 	return any_moved
+
+
+func _recover_blocked_yield_offsets(mates: Array[MatePreview], delta: float) -> bool:
+	var yielded: Array[MatePreview] = []
+	for mate in mates:
+		if mate != null and _yielded_mates.has(mate.get_instance_id()):
+			yielded.append(mate)
+	return _recover_squad_lateral_offsets(yielded, delta)
 
 
 func _yield_hold_active(mate_id: int) -> bool:
@@ -677,7 +697,7 @@ func _yield_hold_active(mate_id: int) -> bool:
 		return false
 	var passage = hold["passage"]
 	if passage != null:
-		if _squad_passages[index] != passage or passage.replan_requested:
+		if _squad_passages[index] != passage or passage.replan_requested or not passage.failed_reason.is_empty():
 			_mate_yield_holds.erase(mate_id)
 			return false
 	else:
@@ -700,7 +720,10 @@ func _request_stationary_ally_yield(index: int, requester: MatePreview, target: 
 	var passage_rect := Rect2(Vector2(NARROW_PASSAGE_SCRIPT.CENTER_X - 0.5, NARROW_PASSAGE_SCRIPT.FRONT_Z), Vector2(1.0, NARROW_PASSAGE_SCRIPT.BACK_Z - NARROW_PASSAGE_SCRIPT.FRONT_Z))
 	var moved := false
 	for other_index in range(_squad_mates.size()):
-		if other_index == index or not _squad_waypoints[other_index].is_empty() or _squad_passages[other_index] != null or bool(_squad_jump_sequences[other_index].get("active", false)):
+		if other_index == index or (not _squad_waypoints[other_index].is_empty() and not _squad_blocked[other_index]) or bool(_squad_jump_sequences[other_index].get("active", false)):
+			continue
+		var other_passage = _squad_passages[other_index]
+		if other_passage != null and other_passage.failed_reason.is_empty():
 			continue
 		for ally in _squad_mates[other_index]:
 			if ally == null or not ally.is_alive() or absf(ally.position.y - requester.position.y) >= WALK_BODY_HEIGHT:
@@ -731,6 +754,7 @@ func _request_stationary_ally_yield(index: int, requester: MatePreview, target: 
 				ally.position += step
 				ally.set_walking(true, squad_move_speed)
 				_mate_lateral_offsets[mate_id] = offset + step
+				_yielded_mates[mate_id] = true
 				if not _mate_yield_holds.has(mate_id):
 					_mate_yield_holds[mate_id] = {"requester": requester, "squad": index, "passage": passage, "origin": ally.position - step, "direction": direction, "waypoint": _squad_waypoints[index][0]}
 				moved = true

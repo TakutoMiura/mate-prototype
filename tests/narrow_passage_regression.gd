@@ -11,6 +11,8 @@ func _initialize() -> void:
 
 
 func _run() -> void:
+	await _check_review_fixes()
+	await _check_squad_exclusion()
 	await _check_route_classification()
 	await _check_passage(false)
 	await _check_passage(true, -6.0)
@@ -42,6 +44,131 @@ func _run() -> void:
 		for failure in failures:
 			push_error(failure)
 		quit(1)
+
+
+func _check_squad_exclusion() -> void:
+	var field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	await physics_frame
+	for squad_index in range(2):
+		for i in range(3):
+			field._squad_mates[squad_index][i].position = Vector3(-25 + (i - 1) * 2.7, 0.04, -12.0 if squad_index == 0 else 14.0)
+	field._squad_waypoints[0].append(Vector3(-25, 0, 15))
+	field._squad_waypoints[1].append(Vector3(-25, 0, -14))
+	var waited := false
+	var finished := false
+	for frame in range(15000):
+		field._process_squad_movement(DELTA)
+		for squad in field._squad_mates:
+			for mate in squad:
+				mate._process(DELTA)
+		if field._squad_passages[1] != null and field._squad_passages[1].wait_point != null:
+			waited = true
+		if field._squad_inside_passage(0) and field._squad_inside_passage(1):
+			failures.append("opposing squads entered the passage at the same time")
+			break
+		if field._squad_waypoints[0].is_empty() and field._squad_waypoints[1].is_empty():
+			finished = true
+			break
+	if not waited or not finished:
+		failures.append("opposing squads failed to wait and pass: waited=%s owner=%s waypoints=%s positions=%s" % [waited, field._passage_owner, field._squad_waypoints, field._squad_mates.slice(0, 2).map(func(squad): return squad.map(func(mate): return mate.position))])
+	field.queue_free()
+	await process_frame
+
+
+func _check_review_fixes() -> void:
+	var field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	await physics_frame
+	var mates: Array = field._squad_mates[0]
+	for i in range(3):
+		mates[i].position = Vector3(-25.0 + (i - 1) * 2.7, 0.04, -12.0)
+	var goal := Vector3(-25, 0, 0)
+	var passage = PASSAGE.new(field, goal, mates)
+	# Move the members into the reverse of their original entrance order.
+	for i in range(3):
+		passage.members[i]["mate"].position = Vector3(-18.0, 0.04, -12.0 + i * 1.3)
+	passage.wait_point = Vector3(-18, 0, -10.7)
+	passage.resume_from_wait()
+	for i in range(2):
+		if passage.members[i]["slot"].z <= passage.members[i + 1]["slot"].z:
+			failures.append("waiting reordered members without reassigning inside slots")
+	field._squad_waypoints[0].append(goal)
+	field._squad_passages[0] = passage
+	field._passage_owner = 0
+	var finished := false
+	for frame in range(9000):
+		field._process_squad_movement(DELTA)
+		for mate in mates:
+			mate._process(DELTA)
+		if field._squad_waypoints[0].is_empty():
+			finished = true
+			break
+	if not finished:
+		failures.append("squad failed to line up inside after waiting")
+	field.queue_free()
+	await process_frame
+
+	field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	await physics_frame
+	mates = field._squad_mates[0]
+	mates[0].position = Vector3(-22.8, 0.04, 10.25)
+	mates[1].position = Vector3(-27.2, 0.04, 10.25)
+	mates[2].position = Vector3(-25.0, 0.04, 5.0)
+	passage = PASSAGE.new(field, Vector3(-25, 0, 15), mates)
+	for state in passage.members:
+		if int(state["phase"]) == 2 and state["mate"].position.distance_to(state["slot"]) > 0.1:
+			failures.append("already exited unit was assigned an occupied opposite parking slot")
+	field._squad_waypoints[0].append(Vector3(-25, 0, 15))
+	field._squad_passages[0] = passage
+	field._passage_owner = 0
+	finished = false
+	for frame in range(9000):
+		field._process_squad_movement(DELTA)
+		for mate in mates:
+			mate._process(DELTA)
+		if field._squad_waypoints[0].is_empty():
+			finished = true
+			break
+	if not finished:
+		failures.append("replanned passage failed to clear already occupied exit slots")
+	field.queue_free()
+	await process_frame
+
+	field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	await physics_frame
+	var requester = field._squad_mates[0][0]
+	var blocker = field._squad_mates[1][0]
+	requester.position = Vector3(10, 0.04, 0)
+	blocker.position = Vector3(10, 0.04, 1)
+	for i in range(1, 3):
+		field._squad_mates[0][i].position = Vector3(20 + i * 3, 0.04, 0)
+		field._squad_mates[1][i].position = Vector3(20 + i * 3, 0.04, 5)
+	field._squad_waypoints[0].append(Vector3(10, 0, 10))
+	field._squad_waypoints[1].append(Vector3(10, 0, 20))
+	field._squad_blocked[1] = true
+	var before: Vector3 = blocker.position
+	if not field._request_stationary_ally_yield(0, requester, Vector3(10, 0.04, 2), DELTA) or blocker.position.is_equal_approx(before):
+		failures.append("blocked squad with an outstanding order did not yield")
+	for frame in range(20):
+		field._request_stationary_ally_yield(0, requester, Vector3(10, 0.04, 2), DELTA)
+	var shifted: Vector3 = blocker.position
+	field._squad_waypoints[0].clear()
+	# The blocked squad keeps its own order while returning from the sidestep.
+	for frame in range(100):
+		field._process_squad_movement(DELTA)
+		if blocker.position.distance_to(before) < 0.01:
+			break
+	if shifted.distance_to(before) < 0.1 or blocker.position.distance_to(before) > 0.01:
+		failures.append("yielded unit did not return after the requester cleared")
+	field.queue_free()
+	await process_frame
 
 
 func _check_entry_correction() -> void:
@@ -298,7 +425,7 @@ func _check_exit_correction() -> void:
 			completed = true
 			break
 	if not completed:
-		failures.append("northbound correction did not reach the original waypoint")
+		failures.append("northbound correction did not reach the original waypoint; blocked=%s positions=%s passage=%s" % [field._squad_blocked[0], field._squad_mates[0].map(func(mate): return mate.position), field._squad_passages[0].members if field._squad_passages[0] != null else null])
 	field.queue_free()
 	await process_frame
 
