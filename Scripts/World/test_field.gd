@@ -309,13 +309,22 @@ func _set_waypoint_from_screen(screen_position: Vector2, append: bool) -> bool:
 	var hit := get_world_3d().direct_space_state.intersect_ray(query)
 	if hit.is_empty():
 		return false
-	var route: Array = _squad_waypoints[_selected_squad_number - 1]
+	return _set_squad_waypoint(_selected_squad_number, hit.position, append)
+
+
+func _set_squad_waypoint(squad_number: int, position: Vector3, append: bool) -> bool:
+	var index := squad_number - 1
+	if index < 0 or index >= _squad_waypoints.size():
+		return false
+	var route: Array = _squad_waypoints[index]
 	if not append:
 		route.clear()
-		_squad_jump_preparations[_selected_squad_number - 1].clear()
-		_squad_traversed_jump_connections[_selected_squad_number - 1].clear()
-		_set_squad_blocked(_selected_squad_number - 1, false)
-	route.append(hit.position)
+		_squad_jump_preparations[index].clear()
+		_squad_traversed_jump_connections[index].clear()
+		if _squad_passages[index] != null:
+			_squad_passages[index].replan_requested = true
+		_set_squad_blocked(index, false)
+	route.append(position)
 	_refresh_waypoint_visual()
 	_set_continuous_rendering(true)
 	return true
@@ -356,7 +365,7 @@ func _process_squad_movement(delta: float) -> bool:
 			continue
 		var passage = _squad_passages[index]
 		var passage_waypoint: Vector3 = route[0]
-		if passage == null or passage.waypoint != passage_waypoint:
+		if passage == null or passage.replan_requested or passage.waypoint != passage_waypoint:
 			var member_inside := false
 			var route_origin := get_squad_point(index + 1)
 			if passage != null:

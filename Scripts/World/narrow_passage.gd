@@ -19,6 +19,7 @@ var exit_point: Vector3
 var members: Array = []
 var failed_reason := ""
 var stop_inside := false
+var replan_requested := false
 
 
 func _init(owner: Node3D, destination: Vector3, squad: Array, previous = null) -> void:

@@ -29,6 +29,8 @@ func _run() -> void:
 	await _check_inside_reposition()
 	await _check_stop_before_obstacle()
 	await _check_blocked_terrain()
+	await _check_reissue_blocked_waypoint()
+	await _check_reissue_during_passage()
 	if failures.is_empty():
 		print("Narrow passage regression checks passed")
 		quit(0)
@@ -201,6 +203,86 @@ func _check_blocked_terrain() -> void:
 	field._process_squad_movement(DELTA)
 	if not field._squad_blocked[0] or mates[1].position.z != -12.0:
 		failures.append("blocked passage was not detected before entering")
+	field.queue_free()
+	await process_frame
+
+
+func _check_reissue_blocked_waypoint() -> void:
+	var field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	var obstacle := StaticBody3D.new()
+	obstacle.collision_layer = 1
+	obstacle.position = Vector3(-25.0, 1.5, 1.0)
+	var shape := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(1.0, 3.0, 1.0)
+	shape.shape = box
+	obstacle.add_child(shape)
+	field.add_child(obstacle)
+	await physics_frame
+	for i in range(3):
+		field._squad_mates[0][i].position = Vector3(-25.0 + (i - 1) * 2.7, 0.04, -12.0)
+	var target := Vector3(-25.0, 0.0, 15.0)
+	field._set_squad_waypoint(1, target, false)
+	field._process_squad_movement(DELTA)
+	var old_plan = field._squad_passages[0]
+	if old_plan == null or not field._squad_blocked[0]:
+		failures.append("reissue setup did not report blocked terrain")
+		field.queue_free()
+		return
+	field._set_squad_waypoint(1, target, false)
+	field._process_squad_movement(DELTA)
+	if field._squad_passages[0] == old_plan or not field._squad_blocked[0]:
+		failures.append("same blocked waypoint did not create a fresh plan")
+	old_plan = field._squad_passages[0]
+	obstacle.queue_free()
+	await process_frame
+	await physics_frame
+	field._set_squad_waypoint(1, target, false)
+	var completed := false
+	for frame in range(9000):
+		field._process_squad_movement(DELTA)
+		for mate in field._squad_mates[0]:
+			mate._process(DELTA)
+		if field._squad_blocked[0]:
+			break
+		if field._squad_waypoints[0].is_empty():
+			completed = true
+			break
+	if field._squad_passages[0] == old_plan or not completed:
+		failures.append("same waypoint did not recover after the obstacle was removed")
+	field.queue_free()
+	await process_frame
+
+
+func _check_reissue_during_passage() -> void:
+	var field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	await physics_frame
+	for i in range(3):
+		field._squad_mates[0][i].position = Vector3(-25.0 + (i - 1) * 2.7, 0.04, -12.0)
+	var target := Vector3(-25.0, 0.0, 15.0)
+	field._set_squad_waypoint(1, target, false)
+	var reissued := false
+	var completed := false
+	var old_plan = null
+	for frame in range(9000):
+		field._process_squad_movement(DELTA)
+		for mate in field._squad_mates[0]:
+			mate._process(DELTA)
+			if not reissued and mate.position.z > -3.0:
+				old_plan = field._squad_passages[0]
+				field._set_squad_waypoint(1, target, false)
+				reissued = true
+		if field._squad_blocked[0]:
+			break
+		if reissued and field._squad_waypoints[0].is_empty():
+			completed = true
+			break
+	if not reissued or not completed or field._squad_passages[0] == old_plan:
+		failures.append("same waypoint could not be replanned during passage")
 	field.queue_free()
 	await process_frame
 
