@@ -21,6 +21,7 @@ var failed_reason := ""
 var stop_inside := false
 var replan_requested := false
 var route_correction: Dictionary = {}
+var wait_point: Variant = null
 
 
 func _init(owner: Node3D, destination: Vector3, squad: Array, previous = null) -> void:
@@ -69,9 +70,12 @@ func _init(owner: Node3D, destination: Vector3, squad: Array, previous = null) -
 		var already_out: bool = not stop_inside and direction * (mate.position.z - exit_z) > BODY_RADIUS
 		var inside: bool = mate.position.z > FRONT_Z and mate.position.z < BACK_Z and absf(mate.position.x - CENTER_X) < 0.5
 		var phase := 2 if already_out else (1 if inside else 0)
-		# Keep the exit centre line clear for units still inside the passage.
-		var slot_offsets := [-2.2, 1.1, -1.1]
+		# The first two units clear opposite sides of the exit. The last unit
+		# parks farther ahead, leaving a clear route between those positions.
+		var slot_offsets := [-2.2, 2.2, 0.0]
 		var slot := Vector3(CENTER_X + slot_offsets[i], mate.position.y, exit_point.z)
+		if i == 2:
+			slot.z += direction * spacing
 		if stop_inside:
 			slot = Vector3(CENTER_X, mate.position.y, stop_center + direction * (half_length - float(i) * spacing))
 		members.append({"mate": mate, "phase": phase, "path": [], "slot": slot, "retry": 0.0, "planned_target": null})
@@ -195,6 +199,14 @@ func process(delta: float) -> bool:
 			finished += 1
 			continue
 		var phase: int = state["phase"]
+		# Do not let the next unit occupy the exit while its predecessor is
+		# still moving aside. Apply the same ordering to units already outside
+		# when a passage route is replanned.
+		if not stop_inside and i > 0 and phase in [1, 2]:
+			var predecessor: Dictionary = members[i - 1]
+			var predecessor_mate = predecessor["mate"]
+			if is_instance_valid(predecessor_mate) and predecessor_mate.is_alive() and int(predecessor["phase"]) == 2:
+				continue
 		var target: Vector3 = entry if phase == 0 else (state["slot"] if stop_inside or phase == 2 else exit_point)
 		# Followers approach while the predecessor is still on its way. They hold
 		# a short queue position until that predecessor reaches the entrance.
@@ -217,6 +229,8 @@ func process(delta: float) -> bool:
 		state["retry"] = maxf(0.0, float(state["retry"]) - delta)
 		var path: Array = state["path"]
 		if path.is_empty():
+			if not stop_inside:
+				field._request_stationary_ally_yield(field._squad_passages.find(self), mate, target, delta, self)
 			if float(state["retry"]) > 0.0:
 				continue
 			if phase == 1:
@@ -264,12 +278,16 @@ func process(delta: float) -> bool:
 				continue
 		var blocked: String = field._get_walk_blocking_reason(mate, step)
 		if not blocked.is_empty():
+			if not stop_inside:
+				field._request_stationary_ally_yield(field._squad_passages.find(self), mate, target, delta, self)
 			if phase == 1 and blocked.begins_with("world collider"):
 				failed_reason = blocked
 			state["path"] = []
 			state["retry"] = 0.2
 			continue
 		if not _segment_clear(mate, mate.position, mate.position + step, true, false):
+			if not stop_inside:
+				field._request_stationary_ally_yield(field._squad_passages.find(self), mate, target, delta, self)
 			state["path"] = []
 			state["retry"] = 0.2
 			continue
@@ -301,6 +319,75 @@ func process(delta: float) -> bool:
 			mate.set_standing_turn(false)
 			turning = turning or mate.is_standing_turn_animating()
 	return not turning
+
+
+func resume_from_wait() -> void:
+	# Waiting moves the members independently, so the order calculated when
+	# the route was first requested no longer describes the entrance approach.
+	members.sort_custom(func(a, b):
+		return a["mate"].position.distance_squared_to(entry) < b["mate"].position.distance_squared_to(entry)
+	)
+	for state in members:
+		state["path"] = []
+		state["planned_target"] = null
+		state["retry"] = 0.0
+	# The original order is unchanged; these are temporary passage anchors.
+	route_correction["entry"] = entry
+	if not stop_inside:
+		route_correction["exit"] = exit_point
+	wait_point = null
+
+
+func wait_for_access(delta: float, point: Vector3) -> void:
+	# Keep each member in a separate slot and never use the reserved passage
+	# while walking to the temporary waiting area.
+	wait_point = point
+	for i in range(members.size()):
+		var state: Dictionary = members[i]
+		var mate = state["mate"]
+		if not is_instance_valid(mate) or not mate.is_alive():
+			continue
+		var target := point + Vector3(0.0, 0.0, (float(i) - float(members.size() - 1) * 0.5) * (UNIT_CLEARANCE + 0.3))
+		target.y = mate.position.y
+		if state.get("wait_target") != target:
+			state["wait_target"] = target
+			state["wait_path"] = []
+			state["wait_retry"] = 0.0
+		if mate.position.distance_to(target) <= POINT_EPSILON:
+			continue
+		state["wait_retry"] = maxf(0.0, float(state.get("wait_retry", 0.0)) - delta)
+		var path: Array = state.get("wait_path", [])
+		if path.is_empty():
+			if float(state["wait_retry"]) > 0.0:
+				continue
+			path = _find_path(mate, target, true, true)
+			if path.is_empty():
+				state["wait_retry"] = 0.2
+				continue
+			state["wait_path"] = path
+		var offset: Vector3 = path[0] - mate.position
+		offset.y = 0.0
+		if offset.length() <= POINT_EPSILON:
+			path.pop_front()
+			continue
+		var heading := atan2(offset.x, offset.z)
+		var difference: float = wrapf(heading - mate.rotation.y, -PI, PI)
+		if absf(difference) > deg_to_rad(1.0):
+			var turn: float = clampf(difference, -deg_to_rad(field.squad_turn_speed_degrees_per_second) * delta, deg_to_rad(field.squad_turn_speed_degrees_per_second) * delta)
+			mate.rotation.y = wrapf(mate.rotation.y + turn, -PI, PI)
+			mate.set_turn_debug_values(heading, rad_to_deg(turn / maxf(delta, 0.001)))
+			mate.set_standing_turn(true)
+			continue
+		mate.set_standing_turn(false)
+		if mate.is_standing_turn_animating():
+			continue
+		var step: Vector3 = offset.normalized() * minf(offset.length(), field.squad_move_speed * delta)
+		if not field._can_walk_displacement(mate, step) or not _segment_clear(mate, mate.position, mate.position + step, true, true):
+			state["wait_path"] = []
+			state["wait_retry"] = 0.2
+			continue
+		mate.position += step
+		mate.set_walking(true, field.squad_move_speed)
 
 
 func _find_path(mate, target: Vector3, include_units: bool, avoid_passage: bool) -> Array:
