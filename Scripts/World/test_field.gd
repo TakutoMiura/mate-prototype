@@ -6,6 +6,7 @@ signal view_changed
 signal tactical_pause_changed(is_paused: bool)
 
 const MATE_UNIT_STATE_SCRIPT := preload("res://Scripts/Data/mate_unit_state.gd")
+const NARROW_PASSAGE_SCRIPT := preload("res://Scripts/World/narrow_passage.gd")
 const SQUAD_COLORS := [Color("#D39B4C"), Color("#6A9AA9"), Color("#879C68")]
 const FLOOR_EXTENT := 30.0
 const SQUAD_SPACING := 12.0
@@ -39,6 +40,9 @@ const WALK_BODY_HEIGHT := 2.7
 @export_range(0.5, 10.0, 0.1) var squad_move_speed := 2.5
 @export_range(15.0, 180.0, 1.0) var squad_turn_speed_degrees_per_second := 90.0
 @export_range(0.5, 4.0, 0.25) var local_avoidance_max_widths := 2.0
+
+@export_group("Narrow Passage")
+@export_range(0.0, 4.0, 0.05) var passage_correction_tolerance := 1.0
 
 @export_group("Jump Movement")
 @export_range(0.5, 6.0, 0.1) var maximum_jump_height := 2.9
@@ -95,16 +99,23 @@ var _squad_headings: Array[float] = []
 var _squad_turning_active: Array[bool] = []
 var _squad_jump_sequences: Array[Dictionary] = []
 var _squad_jump_preparations: Array[Dictionary] = []
+var _squad_passages: Array = []
+var _passage_owner := -1
+var _passage_waiters: Array[int] = []
 var _squad_blocked: Array[bool] = []
 var _squad_traversed_jump_connections: Array[Dictionary] = []
 var _reserved_jump_landings: Array[Vector3] = []
 var _mate_lateral_offsets: Dictionary = {}
+var _mate_yield_holds: Dictionary = {}
+var _yielded_mates: Dictionary = {}
 var _jump_visual_fit_cache: Dictionary = {}
 var _waypoint_visual: MeshInstance3D
 var _waypoint_visual_mesh: ImmediateMesh
 var _waypoint_origin_visual: MeshInstance3D
 var _waypoint_origin_mesh: ImmediateMesh
 var _waypoint_visual_material: StandardMaterial3D
+var _automatic_waypoint_mesh: ImmediateMesh
+var _automatic_waypoint_material: StandardMaterial3D
 var _jump_visual: MeshInstance3D
 var _jump_visual_mesh: ImmediateMesh
 var _jump_route_material: StandardMaterial3D
@@ -307,13 +318,22 @@ func _set_waypoint_from_screen(screen_position: Vector2, append: bool) -> bool:
 	var hit := get_world_3d().direct_space_state.intersect_ray(query)
 	if hit.is_empty():
 		return false
-	var route: Array = _squad_waypoints[_selected_squad_number - 1]
+	return _set_squad_waypoint(_selected_squad_number, hit.position, append)
+
+
+func _set_squad_waypoint(squad_number: int, position: Vector3, append: bool) -> bool:
+	var index := squad_number - 1
+	if index < 0 or index >= _squad_waypoints.size():
+		return false
+	var route: Array = _squad_waypoints[index]
 	if not append:
 		route.clear()
-		_squad_jump_preparations[_selected_squad_number - 1].clear()
-		_squad_traversed_jump_connections[_selected_squad_number - 1].clear()
-		_set_squad_blocked(_selected_squad_number - 1, false)
-	route.append(hit.position)
+		_squad_jump_preparations[index].clear()
+		_squad_traversed_jump_connections[index].clear()
+		if _squad_passages[index] != null:
+			_squad_passages[index].replan_requested = true
+		_set_squad_blocked(index, false)
+	route.append(position)
 	_refresh_waypoint_visual()
 	_set_continuous_rendering(true)
 	return true
@@ -323,6 +343,7 @@ func _process_squad_movement(delta: float) -> bool:
 	var any_active := false
 	var any_positions_moved := false
 	var route_changed := false
+	_update_passage_access()
 	for index in range(_squad_waypoints.size()):
 		for mate in _squad_mates[index]:
 			if mate != null:
@@ -335,8 +356,14 @@ func _process_squad_movement(delta: float) -> bool:
 			any_active = true
 			any_positions_moved = true
 			continue
+		if not route.is_empty() and _squad_blocked[index] and _recover_blocked_yield_offsets(mates, delta):
+			any_active = true
+			any_positions_moved = true
+			continue
 		if route.is_empty():
 			_squad_jump_preparations[index].clear()
+			_squad_passages[index] = null
+			_passage_waiters.erase(index)
 			var recovered := _recover_squad_lateral_offsets(mates, delta)
 			any_active = any_active or recovered
 			any_positions_moved = any_positions_moved or recovered
@@ -351,6 +378,72 @@ func _process_squad_movement(delta: float) -> bool:
 			_squad_traversed_jump_connections[index].clear()
 			route_changed = true
 			continue
+		var passage = _squad_passages[index]
+		var passage_waypoint: Vector3 = route[0]
+		if passage == null or passage.replan_requested or passage.waypoint != passage_waypoint:
+			var member_inside := false
+			var route_origin := get_squad_point(index + 1)
+			for mate in living_mates:
+				if absf(mate.position.x - NARROW_PASSAGE_SCRIPT.CENTER_X) < 0.5 and mate.position.z > NARROW_PASSAGE_SCRIPT.FRONT_Z and mate.position.z < NARROW_PASSAGE_SCRIPT.BACK_Z:
+					member_inside = true
+					if absf(route_origin.x - NARROW_PASSAGE_SCRIPT.CENTER_X) >= 0.5 or route_origin.z <= NARROW_PASSAGE_SCRIPT.FRONT_Z or route_origin.z >= NARROW_PASSAGE_SCRIPT.BACK_Z:
+						route_origin = mate.position
+					break
+			var route_kind: int = NARROW_PASSAGE_SCRIPT.RouteKind.NORMAL
+			var correction: Dictionary = {}
+			var blocked_reason := "the specified route crosses a narrow passage wall"
+			if absf(_get_squad_movement_point(index + 1).y - passage_waypoint.y) < 0.1:
+				route_kind = NARROW_PASSAGE_SCRIPT.classify_route(route_origin, passage_waypoint)
+				if route_kind == NARROW_PASSAGE_SCRIPT.RouteKind.BLOCKED:
+					correction = _get_route_correction(route_origin, passage_waypoint)
+					if not correction.is_empty():
+						route_kind = NARROW_PASSAGE_SCRIPT.RouteKind.PASSAGE
+			if route_kind == NARROW_PASSAGE_SCRIPT.RouteKind.BLOCKED:
+				_squad_passages[index] = null
+				_passage_waiters.erase(index)
+				_set_squad_blocked(index, true, blocked_reason)
+				continue
+			if route_kind == NARROW_PASSAGE_SCRIPT.RouteKind.PASSAGE or member_inside:
+				passage = NARROW_PASSAGE_SCRIPT.new(self, passage_waypoint, living_mates, passage)
+				passage.route_correction = correction
+			else:
+				passage = null
+			_squad_passages[index] = passage
+		if passage != null:
+			if not passage.failed_reason.is_empty():
+				_passage_waiters.erase(index)
+				_set_squad_blocked(index, true, passage.failed_reason)
+				continue
+			if not _claim_passage(index):
+				var wait_position := Vector3(NARROW_PASSAGE_SCRIPT.CENTER_X + 4.5 + MATE_SPACING * float(index + 1), passage.entry.y, passage.entry.z - passage.direction * (MATE_SPACING + WALK_BODY_RADIUS))
+				passage.wait_for_access(delta, wait_position)
+				_set_squad_blocked(index, false)
+				any_active = true
+				any_positions_moved = true
+				continue
+			if passage.wait_point != null:
+				passage.resume_from_wait()
+				route_changed = true
+			for mate in living_mates:
+				_mate_lateral_offsets.erase(mate.get_instance_id())
+				_yielded_mates.erase(mate.get_instance_id())
+			var passage_complete: bool = passage.process(delta)
+			if not passage.failed_reason.is_empty():
+				_set_squad_blocked(index, true, passage.failed_reason)
+			else:
+				_set_squad_blocked(index, false)
+			if passage_complete:
+				_squad_passages[index] = null
+				_squad_headings[index] = living_mates[0].rotation.y
+				_squad_turning_active[index] = false
+				if passage.stop_inside:
+					route.pop_front()
+					_remove_completed_jump_waypoint(index, passage_waypoint)
+					route_changed = true
+			any_active = true
+			any_positions_moved = true
+			continue
+		_passage_waiters.erase(index)
 		var movement_budget := squad_move_speed * delta
 		while not route.is_empty():
 			var point := get_squad_point(index + 1)
@@ -418,7 +511,7 @@ func _process_squad_movement(delta: float) -> bool:
 				route.pop_front()
 				_remove_completed_jump_waypoint(index, waypoint)
 				route_changed = true
-				continue
+				break
 			var target_heading := atan2(direction.x, direction.z)
 			var heading: float = _squad_headings[index]
 			var heading_difference := wrapf(target_heading - heading, -PI, PI)
@@ -473,11 +566,16 @@ func _process_squad_movement(delta: float) -> bool:
 			var displacement := direction / distance * travel_distance
 			var lateral := Vector3(-direction.z / distance, 0.0, direction.x / distance)
 			var any_member_moved := false
+			var any_yield_moved := false
 			var blocking_reason := ""
 			for mate in living_mates:
+				if _yield_hold_active(mate.get_instance_id()):
+					mate.set_walking(false)
+					continue
 				var move_result := _get_member_walk_displacement(mate, displacement, lateral)
 				var member_displacement: Vector3 = move_result["displacement"]
 				if member_displacement.is_zero_approx():
+					any_yield_moved = _request_stationary_ally_yield(index, mate, mate.position + direction.normalized() * (NARROW_PASSAGE_SCRIPT.UNIT_CLEARANCE * 2.0), delta) or any_yield_moved
 					mate.set_walking(false)
 					if blocking_reason.is_empty():
 						blocking_reason = String(move_result.get("blocked_reason", "movement helper returned a zero displacement"))
@@ -486,7 +584,9 @@ func _process_squad_movement(delta: float) -> bool:
 				mate.set_walking(true, squad_move_speed)
 				any_member_moved = true
 			if not any_member_moved:
-				_set_squad_blocked(index, true, "all squad members blocked while moving toward %s: %s" % [travel_target, blocking_reason])
+				_set_squad_blocked(index, not any_yield_moved, "all squad members blocked while moving toward %s: %s" % [travel_target, blocking_reason])
+				any_active = any_active or any_yield_moved
+				any_positions_moved = any_positions_moved or any_yield_moved
 				break
 			_set_squad_blocked(index, false)
 			any_active = true
@@ -511,6 +611,41 @@ func _process_squad_movement(delta: float) -> bool:
 	return any_active
 
 
+func _squad_inside_passage(index: int) -> bool:
+	for mate in _squad_mates[index]:
+		if mate != null and mate.is_alive() and absf(mate.position.x - NARROW_PASSAGE_SCRIPT.CENTER_X) < 0.5 and mate.position.z > NARROW_PASSAGE_SCRIPT.FRONT_Z and mate.position.z < NARROW_PASSAGE_SCRIPT.BACK_Z:
+			return true
+	return false
+
+
+func _update_passage_access() -> void:
+	for index in _passage_waiters.duplicate():
+		if _squad_waypoints[index].is_empty() or _squad_passages[index] == null:
+			_passage_waiters.erase(index)
+	if _passage_owner >= 0 and not _squad_inside_passage(_passage_owner):
+		var owner_passage = _squad_passages[_passage_owner]
+		if owner_passage == null or not owner_passage.failed_reason.is_empty():
+			_passage_owner = -1
+
+
+func _claim_passage(index: int) -> bool:
+	if _passage_owner == index:
+		return true
+	if not _passage_waiters.has(index):
+		_passage_waiters.append(index)
+	if _passage_owner >= 0:
+		return false
+	# A stationary squad inside still occupies the passage, even without a route.
+	for other in range(_squad_mates.size()):
+		if other != index and _squad_inside_passage(other):
+			return false
+	if _passage_waiters[0] != index and not _squad_inside_passage(index):
+		return false
+	_passage_owner = index
+	_passage_waiters.erase(index)
+	return true
+
+
 func _has_reached_travel_target(point: Vector3, target: Vector3) -> bool:
 	return Vector2(point.x - target.x, point.z - target.z).length() <= WAYPOINT_ARRIVAL_RADIUS + WAYPOINT_ARRIVAL_EPSILON
 
@@ -521,9 +656,12 @@ func _recover_squad_lateral_offsets(mates: Array[MatePreview], delta: float) -> 
 		if mate == null or not mate.is_alive():
 			continue
 		var mate_id := mate.get_instance_id()
+		if _yield_hold_active(mate_id):
+			continue
 		var current_offset: Vector3 = _mate_lateral_offsets.get(mate_id, Vector3.ZERO)
 		if current_offset.is_zero_approx():
 			_mate_lateral_offsets.erase(mate_id)
+			_yielded_mates.erase(mate_id)
 			continue
 		var return_move := -current_offset.normalized() * minf(current_offset.length(), squad_move_speed * delta)
 		if not _can_walk_displacement(mate, return_move):
@@ -533,10 +671,95 @@ func _recover_squad_lateral_offsets(mates: Array[MatePreview], delta: float) -> 
 		var remaining_offset := current_offset + return_move
 		if remaining_offset.is_zero_approx():
 			_mate_lateral_offsets.erase(mate_id)
+			_yielded_mates.erase(mate_id)
 		else:
 			_mate_lateral_offsets[mate_id] = remaining_offset
 		any_moved = true
 	return any_moved
+
+
+func _recover_blocked_yield_offsets(mates: Array[MatePreview], delta: float) -> bool:
+	var yielded: Array[MatePreview] = []
+	for mate in mates:
+		if mate != null and _yielded_mates.has(mate.get_instance_id()):
+			yielded.append(mate)
+	return _recover_squad_lateral_offsets(yielded, delta)
+
+
+func _yield_hold_active(mate_id: int) -> bool:
+	if not _mate_yield_holds.has(mate_id):
+		return false
+	var hold: Dictionary = _mate_yield_holds[mate_id]
+	var requester = hold["requester"]
+	var index: int = hold["squad"]
+	if not is_instance_valid(requester) or not requester.is_alive() or _squad_waypoints[index].is_empty():
+		_mate_yield_holds.erase(mate_id)
+		return false
+	var passage = hold["passage"]
+	if passage != null:
+		if _squad_passages[index] != passage or passage.replan_requested or not passage.failed_reason.is_empty():
+			_mate_yield_holds.erase(mate_id)
+			return false
+	else:
+		var origin: Vector3 = hold["origin"]
+		var direction: Vector3 = hold["direction"]
+		if _squad_waypoints[index][0] != hold["waypoint"] or (requester.position - origin).dot(direction) >= NARROW_PASSAGE_SCRIPT.UNIT_CLEARANCE:
+			_mate_yield_holds.erase(mate_id)
+			return false
+	return true
+
+
+func _request_stationary_ally_yield(index: int, requester: MatePreview, target: Vector3, delta: float, passage = null) -> bool:
+	var start := Vector2(requester.position.x, requester.position.z)
+	var segment := Vector2(target.x - start.x, target.z - start.y)
+	if segment.length_squared() < 0.0001:
+		return false
+	var direction := Vector3(segment.x, 0.0, segment.y).normalized()
+	var lateral := Vector3(-direction.z, 0.0, direction.x)
+	var maximum_offset := local_avoidance_max_widths * WALK_BODY_RADIUS * 2.0
+	var passage_rect := Rect2(Vector2(NARROW_PASSAGE_SCRIPT.CENTER_X - 0.5, NARROW_PASSAGE_SCRIPT.FRONT_Z), Vector2(1.0, NARROW_PASSAGE_SCRIPT.BACK_Z - NARROW_PASSAGE_SCRIPT.FRONT_Z))
+	var moved := false
+	for other_index in range(_squad_mates.size()):
+		if other_index == index or (not _squad_waypoints[other_index].is_empty() and not _squad_blocked[other_index]) or bool(_squad_jump_sequences[other_index].get("active", false)):
+			continue
+		var other_passage = _squad_passages[other_index]
+		if other_passage != null and other_passage.failed_reason.is_empty():
+			continue
+		for ally in _squad_mates[other_index]:
+			if ally == null or not ally.is_alive() or absf(ally.position.y - requester.position.y) >= WALK_BODY_HEIGHT:
+				continue
+			var ally_point := Vector2(ally.position.x, ally.position.z)
+			if passage_rect.has_point(ally_point):
+				continue
+			var t := clampf((ally_point - start).dot(segment) / segment.length_squared(), 0.0, 1.0)
+			var closest := start + segment * t
+			if ally_point.distance_to(closest) >= NARROW_PASSAGE_SCRIPT.UNIT_CLEARANCE:
+				continue
+			var mate_id: int = ally.get_instance_id()
+			if _yield_hold_active(mate_id):
+				var existing: Dictionary = _mate_yield_holds[mate_id]
+				if existing["requester"] != requester:
+					continue
+			var offset: Vector3 = _mate_lateral_offsets.get(mate_id, Vector3.ZERO)
+			var sign_order: Array[float] = [1.0, -1.0]
+			if Vector3(ally_point.x - closest.x, 0.0, ally_point.y - closest.y).dot(lateral) < 0.0:
+				sign_order.reverse()
+			for side in sign_order:
+				var step := lateral * side * minf(squad_move_speed * delta, maximum_offset)
+				if (offset + step).length() > maximum_offset + 0.001:
+					continue
+				var end := ally_point + Vector2(step.x, step.z)
+				if NARROW_PASSAGE_SCRIPT._segment_intersects_rect(ally_point, end, passage_rect) or not _can_walk_displacement(ally, step):
+					continue
+				ally.position += step
+				ally.set_walking(true, squad_move_speed)
+				_mate_lateral_offsets[mate_id] = offset + step
+				_yielded_mates[mate_id] = true
+				if not _mate_yield_holds.has(mate_id):
+					_mate_yield_holds[mate_id] = {"requester": requester, "squad": index, "passage": passage, "origin": ally.position - step, "direction": direction, "waypoint": _squad_waypoints[index][0]}
+				moved = true
+				break
+	return moved
 
 
 func _get_member_walk_displacement(mate: MatePreview, desired_displacement: Vector3, lateral: Vector3) -> Dictionary:
@@ -1371,11 +1594,22 @@ func _refresh_waypoint_visual() -> void:
 		var marker_center: Vector3 = waypoint + Vector3(0, WAYPOINT_VISUAL_HEIGHT, 0)
 		if index > 0:
 			var jump_routes := _get_squad_jump_routes(selected_index, waypoint, movement_point)
+			var correction: Dictionary = {}
+			if absf(movement_point.y - waypoint.y) < 0.1:
+				correction = _get_route_correction(movement_point, waypoint)
 			if not jump_routes.is_empty():
 				_waypoint_visual_mesh.surface_add_vertex(previous_point)
 				for jump_route in jump_routes:
 					_waypoint_visual_mesh.surface_add_vertex(_jump_visual_position(jump_route, true) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 					_waypoint_visual_mesh.surface_add_vertex(_jump_visual_position(jump_route, false) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
+				_waypoint_visual_mesh.surface_add_vertex(marker_center)
+			elif not correction.is_empty():
+				_waypoint_visual_mesh.surface_add_vertex(previous_point)
+				for key in ["entry", "exit"]:
+					if correction.has(key):
+						var anchor: Vector3 = correction[key] + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
+						_waypoint_visual_mesh.surface_add_vertex(anchor)
+						_waypoint_visual_mesh.surface_add_vertex(anchor)
 				_waypoint_visual_mesh.surface_add_vertex(marker_center)
 			else:
 				_waypoint_visual_mesh.surface_add_vertex(previous_point)
@@ -1405,6 +1639,7 @@ func _refresh_waypoint_origin_visual() -> void:
 	if _waypoint_origin_mesh == null:
 		return
 	_waypoint_origin_mesh.clear_surfaces()
+	_refresh_automatic_waypoint_visual()
 	if _selected_squad_number <= 0 or _selected_squad_number > _squad_waypoints.size():
 		return
 	var route: Array = _squad_waypoints[_selected_squad_number - 1]
@@ -1418,16 +1653,114 @@ func _refresh_waypoint_origin_visual() -> void:
 		_get_squad_movement_point(_selected_squad_number)
 	)
 	var route_origin: Vector3 = get_squad_point(_selected_squad_number) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
+	var correction := _get_passage_route_correction(squad_index, first_waypoint)
 	_waypoint_origin_mesh.surface_begin(Mesh.PRIMITIVE_LINES, _waypoint_visual_material)
 	_waypoint_origin_mesh.surface_add_vertex(route_origin)
-	if not jump_routes.is_empty():
+	var active_passage = _squad_passages[squad_index]
+	if active_passage != null and active_passage.wait_point != null and not active_passage.replan_requested:
+		_waypoint_origin_mesh.surface_add_vertex(active_passage.wait_point + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
+	elif not jump_routes.is_empty():
 		for jump_route in jump_routes:
 			_waypoint_origin_mesh.surface_add_vertex(_jump_visual_position(jump_route, true) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 			_waypoint_origin_mesh.surface_add_vertex(_jump_visual_position(jump_route, false) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 		_waypoint_origin_mesh.surface_add_vertex(first_waypoint + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
+	elif not correction.is_empty():
+		for key in ["entry", "exit"]:
+			if correction.has(key):
+				var anchor: Vector3 = correction[key] + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
+				_waypoint_origin_mesh.surface_add_vertex(anchor)
+				_waypoint_origin_mesh.surface_add_vertex(anchor)
+		_waypoint_origin_mesh.surface_add_vertex(first_waypoint + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 	else:
 		_waypoint_origin_mesh.surface_add_vertex(first_waypoint + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 	_waypoint_origin_mesh.surface_end()
+
+
+func _refresh_automatic_waypoint_visual() -> void:
+	if _automatic_waypoint_mesh == null:
+		return
+	_automatic_waypoint_mesh.clear_surfaces()
+	if _selected_squad_number <= 0 or _selected_squad_number > _squad_waypoints.size():
+		return
+	var index := _selected_squad_number - 1
+	var route: Array = _squad_waypoints[index]
+	if route.is_empty():
+		return
+	var points: Array[Vector3] = []
+	var passage = _squad_passages[index]
+	if passage != null and passage.wait_point != null and not passage.replan_requested:
+		points.append(passage.wait_point)
+	var origin := _get_squad_movement_point(_selected_squad_number)
+	for i in range(route.size()):
+		var destination: Vector3 = route[i]
+		var correction: Dictionary = _get_passage_route_correction(index, destination) if i == 0 else _get_route_correction(origin, destination)
+		for key in ["entry", "exit"]:
+			if correction.has(key):
+				points.append(correction[key])
+		origin = destination
+	if points.is_empty():
+		return
+	_automatic_waypoint_mesh.surface_begin(Mesh.PRIMITIVE_LINES, _automatic_waypoint_material)
+	for point in points:
+		var center := point + Vector3.UP * (WAYPOINT_VISUAL_HEIGHT * 1.5)
+		for segment in range(WAYPOINT_MARKER_SEGMENTS):
+			var a := TAU * float(segment) / WAYPOINT_MARKER_SEGMENTS
+			var b := TAU * float(segment + 1) / WAYPOINT_MARKER_SEGMENTS
+			_automatic_waypoint_mesh.surface_add_vertex(center + Vector3(cos(a), 0.0, sin(a)) * WAYPOINT_MARKER_RADIUS)
+			_automatic_waypoint_mesh.surface_add_vertex(center + Vector3(cos(b), 0.0, sin(b)) * WAYPOINT_MARKER_RADIUS)
+	_automatic_waypoint_mesh.surface_end()
+
+
+func _get_passage_route_correction(squad_index: int, waypoint: Vector3) -> Dictionary:
+	var passage = _squad_passages[squad_index]
+	if passage != null and not passage.replan_requested and passage.waypoint == waypoint:
+		var remaining: Dictionary = passage.route_correction.duplicate()
+		var point := get_squad_point(squad_index + 1)
+		var entry_z: float = NARROW_PASSAGE_SCRIPT.FRONT_Z if passage.direction > 0.0 else NARROW_PASSAGE_SCRIPT.BACK_Z
+		var exit_z: float = NARROW_PASSAGE_SCRIPT.BACK_Z if passage.direction > 0.0 else NARROW_PASSAGE_SCRIPT.FRONT_Z
+		if passage.direction * (point.z - entry_z) >= 0.0:
+			remaining.erase("entry")
+		if passage.direction * (point.z - exit_z) >= 0.0:
+			remaining.erase("exit")
+		return remaining
+	var origin := get_squad_point(squad_index + 1)
+	if passage != null:
+		for mate in _squad_mates[squad_index]:
+			if mate != null and mate.is_alive() and absf(mate.position.x - NARROW_PASSAGE_SCRIPT.CENTER_X) < 0.5 and mate.position.z > NARROW_PASSAGE_SCRIPT.FRONT_Z and mate.position.z < NARROW_PASSAGE_SCRIPT.BACK_Z:
+				origin = mate.position
+				break
+	if absf(_get_squad_movement_point(squad_index + 1).y - waypoint.y) >= 0.1:
+		return {}
+	return _get_route_correction(origin, waypoint)
+
+
+func _get_route_correction(origin: Vector3, waypoint: Vector3) -> Dictionary:
+	var correction: Dictionary = NARROW_PASSAGE_SCRIPT.get_exit_correction(origin, waypoint, passage_correction_tolerance)
+	if correction.is_empty():
+		correction = NARROW_PASSAGE_SCRIPT.get_entry_correction(origin, waypoint, passage_correction_tolerance)
+	if correction.has("entry") and not _is_correction_segment_clear(origin, correction["entry"]):
+		return {}
+	if correction.has("exit") and not _is_correction_segment_clear(correction["exit"], waypoint):
+		return {}
+	return correction
+
+
+func _is_correction_segment_clear(start: Vector3, waypoint: Vector3) -> bool:
+	var shape := CapsuleShape3D.new()
+	shape.radius = WALK_BODY_RADIUS
+	shape.height = WALK_BODY_HEIGHT
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = shape
+	query.transform = Transform3D(Basis.IDENTITY, start + Vector3.UP * shape.height * 0.5)
+	query.motion = waypoint - start
+	query.collision_mask = 1
+	var space := get_world_3d().direct_space_state
+	var motion := space.cast_motion(query)
+	if not motion.is_empty() and motion[0] < 1.0:
+		return false
+	query.motion = Vector3.ZERO
+	query.transform.origin = waypoint + Vector3.UP * shape.height * 0.5
+	return space.intersect_shape(query, 1).is_empty()
 
 
 func _refresh_jump_visual() -> void:
@@ -1667,6 +2000,29 @@ func _add_jump_platform(platform_name: String, size: Vector3, position: Vector3,
 	add_child(platform_body)
 
 
+func _add_corridor_wall(wall_name: String, size: Vector3, position: Vector3, material: Material) -> void:
+	var wall := MeshInstance3D.new()
+	wall.name = wall_name
+	var wall_mesh := BoxMesh.new()
+	wall_mesh.size = size
+	wall.mesh = wall_mesh
+	wall.position = position
+	wall.material_override = material
+	add_child(wall)
+
+	var wall_body := StaticBody3D.new()
+	wall_body.name = "%sCollision" % wall_name
+	wall_body.collision_layer = 1
+	wall_body.collision_mask = 0
+	wall_body.position = position
+	var wall_shape := CollisionShape3D.new()
+	var wall_box := BoxShape3D.new()
+	wall_box.size = size
+	wall_shape.shape = wall_box
+	wall_body.add_child(wall_shape)
+	add_child(wall_body)
+
+
 func _build_ground() -> void:
 	var ground := MeshInstance3D.new()
 	ground.name = "TestFieldGround"
@@ -1695,6 +2051,12 @@ func _build_ground() -> void:
 	highland_material.albedo_color = Color("#34464B")
 	highland_material.roughness = 0.94
 	_add_jump_platform("JumpHighland", Vector3(8.0, 0.4, 7.0), Vector3(0.0, 3.0, 26.0), highland_material)
+
+	var corridor_material := StandardMaterial3D.new()
+	corridor_material.albedo_color = Color("#58666A")
+	corridor_material.roughness = 0.9
+	_add_corridor_wall("NarrowPassageWestWall", Vector3(4.0, 3.0, 16.0), Vector3(-27.5, 1.5, 1.0), corridor_material)
+	_add_corridor_wall("NarrowPassageEastWall", Vector3(4.0, 3.0, 16.0), Vector3(-22.5, 1.5, 1.0), corridor_material)
 
 	var grid_mesh := ImmediateMesh.new()
 	var grid_material := StandardMaterial3D.new()
@@ -1736,6 +2098,15 @@ func _build_ground() -> void:
 	_jump_visual.mesh = _jump_visual_mesh
 	_jump_visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_jump_visual)
+	_automatic_waypoint_mesh = ImmediateMesh.new()
+	_automatic_waypoint_material = StandardMaterial3D.new()
+	_automatic_waypoint_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_automatic_waypoint_material.albedo_color = Color("#69D96B")
+	var automatic_visual := MeshInstance3D.new()
+	automatic_visual.name = "SelectedSquadAutomaticWaypoints"
+	automatic_visual.mesh = _automatic_waypoint_mesh
+	automatic_visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(automatic_visual)
 	_waypoint_origin_mesh = ImmediateMesh.new()
 	_waypoint_origin_visual = MeshInstance3D.new()
 	_waypoint_origin_visual.name = "SelectedSquadWaypointOrigin"
@@ -1790,6 +2161,7 @@ func _build_sample_mates() -> void:
 		_squad_turning_active.append(false)
 		_squad_jump_sequences.append({"active": false})
 		_squad_jump_preparations.append({})
+		_squad_passages.append(null)
 		_squad_blocked.append(false)
 		_squad_traversed_jump_connections.append({})
 		var squad_states: Array[Resource] = []
