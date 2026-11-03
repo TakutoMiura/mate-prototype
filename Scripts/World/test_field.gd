@@ -41,6 +41,9 @@ const WALK_BODY_HEIGHT := 2.7
 @export_range(15.0, 180.0, 1.0) var squad_turn_speed_degrees_per_second := 90.0
 @export_range(0.5, 4.0, 0.25) var local_avoidance_max_widths := 2.0
 
+@export_group("Narrow Passage")
+@export_range(0.0, 4.0, 0.05) var passage_correction_tolerance := 1.0
+
 @export_group("Jump Movement")
 @export_range(0.5, 6.0, 0.1) var maximum_jump_height := 2.9
 @export_range(0.2, 3.0, 0.05) var jump_duration_seconds := 0.8
@@ -375,14 +378,21 @@ func _process_squad_movement(delta: float) -> bool:
 						route_origin = mate.position
 						break
 			var route_kind: int = NARROW_PASSAGE_SCRIPT.RouteKind.NORMAL
+			var correction: Dictionary = {}
+			var blocked_reason := "the specified route crosses a narrow passage wall"
 			if absf(_get_squad_movement_point(index + 1).y - passage_waypoint.y) < 0.1:
 				route_kind = NARROW_PASSAGE_SCRIPT.classify_route(route_origin, passage_waypoint)
+				if route_kind == NARROW_PASSAGE_SCRIPT.RouteKind.BLOCKED:
+					correction = _get_route_correction(route_origin, passage_waypoint)
+					if not correction.is_empty():
+						route_kind = NARROW_PASSAGE_SCRIPT.RouteKind.PASSAGE
 			if route_kind == NARROW_PASSAGE_SCRIPT.RouteKind.BLOCKED:
 				_squad_passages[index] = null
-				_set_squad_blocked(index, true, "the specified route crosses a narrow passage wall")
+				_set_squad_blocked(index, true, blocked_reason)
 				continue
 			if route_kind == NARROW_PASSAGE_SCRIPT.RouteKind.PASSAGE or member_inside:
 				passage = NARROW_PASSAGE_SCRIPT.new(self, passage_waypoint, living_mates, passage)
+				passage.route_correction = correction
 			else:
 				passage = null
 			_squad_passages[index] = passage
@@ -1425,11 +1435,22 @@ func _refresh_waypoint_visual() -> void:
 		var marker_center: Vector3 = waypoint + Vector3(0, WAYPOINT_VISUAL_HEIGHT, 0)
 		if index > 0:
 			var jump_routes := _get_squad_jump_routes(selected_index, waypoint, movement_point)
+			var correction: Dictionary = {}
+			if absf(movement_point.y - waypoint.y) < 0.1:
+				correction = _get_route_correction(movement_point, waypoint)
 			if not jump_routes.is_empty():
 				_waypoint_visual_mesh.surface_add_vertex(previous_point)
 				for jump_route in jump_routes:
 					_waypoint_visual_mesh.surface_add_vertex(_jump_visual_position(jump_route, true) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 					_waypoint_visual_mesh.surface_add_vertex(_jump_visual_position(jump_route, false) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
+				_waypoint_visual_mesh.surface_add_vertex(marker_center)
+			elif not correction.is_empty():
+				_waypoint_visual_mesh.surface_add_vertex(previous_point)
+				for key in ["entry", "exit"]:
+					if correction.has(key):
+						var anchor: Vector3 = correction[key] + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
+						_waypoint_visual_mesh.surface_add_vertex(anchor)
+						_waypoint_visual_mesh.surface_add_vertex(anchor)
 				_waypoint_visual_mesh.surface_add_vertex(marker_center)
 			else:
 				_waypoint_visual_mesh.surface_add_vertex(previous_point)
@@ -1472,6 +1493,7 @@ func _refresh_waypoint_origin_visual() -> void:
 		_get_squad_movement_point(_selected_squad_number)
 	)
 	var route_origin: Vector3 = get_squad_point(_selected_squad_number) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
+	var correction := _get_passage_route_correction(squad_index, first_waypoint)
 	_waypoint_origin_mesh.surface_begin(Mesh.PRIMITIVE_LINES, _waypoint_visual_material)
 	_waypoint_origin_mesh.surface_add_vertex(route_origin)
 	if not jump_routes.is_empty():
@@ -1479,9 +1501,68 @@ func _refresh_waypoint_origin_visual() -> void:
 			_waypoint_origin_mesh.surface_add_vertex(_jump_visual_position(jump_route, true) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 			_waypoint_origin_mesh.surface_add_vertex(_jump_visual_position(jump_route, false) + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 		_waypoint_origin_mesh.surface_add_vertex(first_waypoint + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
+	elif not correction.is_empty():
+		for key in ["entry", "exit"]:
+			if correction.has(key):
+				var anchor: Vector3 = correction[key] + Vector3.UP * WAYPOINT_VISUAL_HEIGHT
+				_waypoint_origin_mesh.surface_add_vertex(anchor)
+				_waypoint_origin_mesh.surface_add_vertex(anchor)
+		_waypoint_origin_mesh.surface_add_vertex(first_waypoint + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 	else:
 		_waypoint_origin_mesh.surface_add_vertex(first_waypoint + Vector3.UP * WAYPOINT_VISUAL_HEIGHT)
 	_waypoint_origin_mesh.surface_end()
+
+
+func _get_passage_route_correction(squad_index: int, waypoint: Vector3) -> Dictionary:
+	var passage = _squad_passages[squad_index]
+	if passage != null and not passage.replan_requested and passage.waypoint == waypoint:
+		var remaining: Dictionary = passage.route_correction.duplicate()
+		var point := get_squad_point(squad_index + 1)
+		var entry_z: float = NARROW_PASSAGE_SCRIPT.FRONT_Z if passage.direction > 0.0 else NARROW_PASSAGE_SCRIPT.BACK_Z
+		var exit_z: float = NARROW_PASSAGE_SCRIPT.BACK_Z if passage.direction > 0.0 else NARROW_PASSAGE_SCRIPT.FRONT_Z
+		if passage.direction * (point.z - entry_z) >= 0.0:
+			remaining.erase("entry")
+		if passage.direction * (point.z - exit_z) >= 0.0:
+			remaining.erase("exit")
+		return remaining
+	var origin := get_squad_point(squad_index + 1)
+	if passage != null:
+		for mate in _squad_mates[squad_index]:
+			if mate != null and mate.is_alive() and absf(mate.position.x - NARROW_PASSAGE_SCRIPT.CENTER_X) < 0.5 and mate.position.z > NARROW_PASSAGE_SCRIPT.FRONT_Z and mate.position.z < NARROW_PASSAGE_SCRIPT.BACK_Z:
+				origin = mate.position
+				break
+	if absf(_get_squad_movement_point(squad_index + 1).y - waypoint.y) >= 0.1:
+		return {}
+	return _get_route_correction(origin, waypoint)
+
+
+func _get_route_correction(origin: Vector3, waypoint: Vector3) -> Dictionary:
+	var correction: Dictionary = NARROW_PASSAGE_SCRIPT.get_exit_correction(origin, waypoint, passage_correction_tolerance)
+	if correction.is_empty():
+		correction = NARROW_PASSAGE_SCRIPT.get_entry_correction(origin, waypoint, passage_correction_tolerance)
+	if correction.has("entry") and not _is_correction_segment_clear(origin, correction["entry"]):
+		return {}
+	if correction.has("exit") and not _is_correction_segment_clear(correction["exit"], waypoint):
+		return {}
+	return correction
+
+
+func _is_correction_segment_clear(start: Vector3, waypoint: Vector3) -> bool:
+	var shape := CapsuleShape3D.new()
+	shape.radius = WALK_BODY_RADIUS
+	shape.height = WALK_BODY_HEIGHT
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = shape
+	query.transform = Transform3D(Basis.IDENTITY, start + Vector3.UP * shape.height * 0.5)
+	query.motion = waypoint - start
+	query.collision_mask = 1
+	var space := get_world_3d().direct_space_state
+	var motion := space.cast_motion(query)
+	if not motion.is_empty() and motion[0] < 1.0:
+		return false
+	query.motion = Vector3.ZERO
+	query.transform.origin = waypoint + Vector3.UP * shape.height * 0.5
+	return space.intersect_shape(query, 1).is_empty()
 
 
 func _refresh_jump_visual() -> void:

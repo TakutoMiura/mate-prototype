@@ -31,6 +31,10 @@ func _run() -> void:
 	await _check_blocked_terrain()
 	await _check_reissue_blocked_waypoint()
 	await _check_reissue_during_passage()
+	await _check_exit_correction()
+	await _check_entry_correction()
+	await _check_entry_correction_obstacles()
+	await _check_entry_correction_queued()
 	if failures.is_empty():
 		print("Narrow passage regression checks passed")
 		quit(0)
@@ -38,6 +42,265 @@ func _run() -> void:
 		for failure in failures:
 			push_error(failure)
 		quit(1)
+
+
+func _check_entry_correction() -> void:
+	var start := Vector3(-25, 0, -12)
+	var near := Vector3(-23.2, 0, 15)
+	var too_far_at_exit := Vector3(-23.0, 0, 15)
+	var too_far_at_entry := Vector3(-22, 0, -12)
+	var boundary := Vector3(-23.0714286, 0, 15)
+	if PASSAGE.get_entry_correction(start, near, 1.0).is_empty() or PASSAGE.get_entry_correction(start, boundary, 1.0).is_empty():
+		failures.append("valid entry correction was not selected")
+	if not PASSAGE.get_entry_correction(start, too_far_at_exit, 1.0).is_empty() or not PASSAGE.get_entry_correction(too_far_at_entry, Vector3(-25, 0, 15), 1.0).is_empty():
+		failures.append("entry correction ignored the tolerance at one opening")
+	if not PASSAGE.get_entry_correction(start, near, 0.0).is_empty() or not PASSAGE.get_entry_correction(Vector3(0, 0, -12), Vector3(-21, 0, 15), 1.0).is_empty():
+		failures.append("entry correction ignored a disabled setting or redirected a clear route")
+	var cases := [
+		{"start": start, "goal": near, "entry": Vector3(-25, 0.06, -7.65), "exit": Vector3(-25, 0.06, 10.25)},
+		{"start": Vector3(-25, 0, 14), "goal": Vector3(-23, 0, -14), "entry": Vector3(-25, 0.06, 9.65), "exit": Vector3(-25, 0.06, -8.25)},
+		{"start": Vector3(-23, 0, -12), "goal": Vector3(-25, 0, 0), "entry": Vector3(-25, 0.06, -7.65)},
+	]
+	for example in cases:
+		var field = FIELD.instantiate()
+		field.set_process(false)
+		root.add_child(field)
+		await physics_frame
+		var start_point: Vector3 = example["start"]
+		var target: Vector3 = example["goal"]
+		var mates: Array = field._squad_mates[0]
+		for i in range(3):
+			mates[i].position = start_point + Vector3((i - 1) * 2.7, 0.04, 0)
+		field._selected_squad_number = 1
+		field._set_squad_waypoint(1, target, false)
+		var vertices: PackedVector3Array = field._waypoint_origin_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+		var expected_size := 6 if example.has("exit") else 4
+		if vertices.size() != expected_size or not vertices[1].is_equal_approx(example["entry"]) or (example.has("exit") and not vertices[3].is_equal_approx(example["exit"])) or not vertices[expected_size - 1].is_equal_approx(target + Vector3.UP * 0.06):
+			failures.append("entry correction preview did not show anchors and the original waypoint: %s" % example)
+		var completed := false
+		var passed_entry_preview := false
+		for frame in range(9000):
+			field._process_squad_movement(DELTA)
+			for mate in mates:
+				mate._process(DELTA)
+			var point: Vector3 = field.get_squad_point(1)
+			if not passed_entry_preview and field._squad_passages[0] != null and point.z > -6.8 and point.z < 8.8:
+				field._refresh_waypoint_origin_visual()
+				var remaining: PackedVector3Array = field._waypoint_origin_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+				var expected_remaining := 4 if example.has("exit") else 2
+				if remaining.size() != expected_remaining or (example.has("exit") and not remaining[1].is_equal_approx(example["exit"])):
+					failures.append("passed entry remained in the displayed route: %s" % example)
+				passed_entry_preview = true
+			if field._squad_blocked[0]:
+				break
+			if field._squad_waypoints[0].is_empty():
+				completed = true
+				break
+			if field._squad_waypoints[0][0] != target:
+				failures.append("entry correction changed the waypoint")
+				break
+		if not completed:
+			failures.append("entry correction failed to reach the original waypoint: %s" % example)
+		if not passed_entry_preview:
+			failures.append("entry correction did not reach the passage for preview: %s" % example)
+		field.queue_free()
+		await process_frame
+	var field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	await physics_frame
+	for i in range(3):
+		field._squad_mates[0][i].position = start + Vector3((i - 1) * 2.7, 0.04, 0)
+	field._set_squad_waypoint(1, too_far_at_exit, false)
+	field._process_squad_movement(DELTA)
+	if not field._squad_blocked[0] or field._squad_passages[0] != null:
+		failures.append("entry correction outside the limit was not blocked")
+	field.queue_free()
+	await process_frame
+
+
+func _check_entry_correction_obstacles() -> void:
+	for obstacle_position in [Vector3(-25, 1.5, -9.5), Vector3(-24.1, 1.5, 12.6)]:
+		var field = FIELD.instantiate()
+		field.set_process(false)
+		root.add_child(field)
+		var obstacle := StaticBody3D.new()
+		obstacle.collision_layer = 1
+		obstacle.position = obstacle_position
+		var shape := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		box.size = Vector3(1.0, 3.0, 1.0)
+		shape.shape = box
+		obstacle.add_child(shape)
+		field.add_child(obstacle)
+		await physics_frame
+		for i in range(3):
+			field._squad_mates[0][i].position = Vector3(-25 + (i - 1) * 2.7, 0.04, -12)
+		field._set_squad_waypoint(1, Vector3(-23.2, 0, 15), false)
+		field._process_squad_movement(DELTA)
+		if not field._squad_blocked[0] or field._squad_passages[0] != null:
+			failures.append("obstacle at %s did not block the corrected entry route" % obstacle_position)
+		field.queue_free()
+		await process_frame
+
+
+func _check_entry_correction_queued() -> void:
+	var field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	await physics_frame
+	for i in range(3):
+		field._squad_mates[0][i].position = Vector3(-25 + (i - 1) * 2.7, 0.04, -20)
+	field._selected_squad_number = 1
+	var target := Vector3(-23.2, 0, 15)
+	field._set_squad_waypoint(1, Vector3(-25, 0, -12), false)
+	field._set_squad_waypoint(1, target, true)
+	var vertices: PackedVector3Array = field._waypoint_visual_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	if vertices.size() < 38 or not vertices[33].is_equal_approx(Vector3(-25, 0.06, -7.65)) or not vertices[35].is_equal_approx(Vector3(-25, 0.06, 10.25)) or not vertices[37].is_equal_approx(target + Vector3.UP * 0.06):
+		failures.append("queued entry correction did not display both openings and the waypoint")
+	var completed := false
+	for frame in range(9000):
+		field._process_squad_movement(DELTA)
+		for mate in field._squad_mates[0]:
+			mate._process(DELTA)
+		if field._squad_blocked[0]:
+			break
+		if field._squad_waypoints[0].is_empty():
+			completed = true
+			break
+	if not completed:
+		failures.append("queued entry correction failed to reach the waypoint")
+	field.queue_free()
+	await process_frame
+
+
+func _check_exit_correction() -> void:
+	var origin := Vector3(-25, 0, 0)
+	var near := Vector3(-22.4, 0, -14)
+	var boundary := Vector3(-22.0, 0, -14)
+	var outside := Vector3(-21.98, 0, -14)
+	var far := Vector3(-15, 0, -14)
+	var north := Vector3(-22.0, 0, 18)
+	if PASSAGE.get_exit_correction(origin, near, 1.0).is_empty() or PASSAGE.get_exit_correction(origin, boundary, 1.0).is_empty() or PASSAGE.get_exit_correction(origin, north, 1.0).is_empty():
+		failures.append("valid exit correction was not selected")
+	if not PASSAGE.get_exit_correction(origin, outside, 1.0).is_empty() or not PASSAGE.get_exit_correction(origin, far, 1.0).is_empty() or not PASSAGE.get_exit_correction(origin, near, 0.0).is_empty() or not PASSAGE.get_exit_correction(origin, near, 0.25).is_empty():
+		failures.append("exit correction exceeded its limit or was not disabled")
+	if not PASSAGE.get_exit_correction(Vector3(-25, 0, -12), near, 1.0).is_empty():
+		failures.append("exit correction was applied outside the passage")
+	var field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	await physics_frame
+	var mates: Array = field._squad_mates[0]
+	for i in range(mates.size()):
+		mates[i].position = Vector3(-25, 0.04, (i - 1) * 1.1)
+	field._selected_squad_number = 1
+	field._set_squad_waypoint(1, near, false)
+	var vertices: PackedVector3Array = field._waypoint_origin_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	if vertices.size() != 4 or not vertices[1].is_equal_approx(Vector3(-25.0, 0.06, -8.25)) or not vertices[3].is_equal_approx(near + Vector3.UP * 0.06):
+		failures.append("corrected route preview did not show the exit and original waypoint")
+	var completed := false
+	for frame in range(9000):
+		field._process_squad_movement(DELTA)
+		for mate in mates:
+			mate._process(DELTA)
+		if field._squad_blocked[0]:
+			break
+		if field._squad_waypoints[0].is_empty():
+			completed = true
+			break
+		if field._squad_waypoints[0][0] != near:
+			failures.append("exit correction changed the waypoint")
+			break
+	if not completed:
+		failures.append("corrected route did not reach the original waypoint")
+	field.queue_free()
+	await process_frame
+	field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	await physics_frame
+	for i in range(3):
+		field._squad_mates[0][i].position = Vector3(-25, 0.04, (i - 1) * 1.1)
+	field._set_squad_waypoint(1, far, false)
+	field._process_squad_movement(DELTA)
+	if not field._squad_blocked[0] or field._squad_passages[0] != null:
+		failures.append("route outside the correction limit was not blocked")
+	field.passage_correction_tolerance = 0.25
+	field._set_squad_waypoint(1, near, false)
+	field._process_squad_movement(DELTA)
+	if not field._squad_blocked[0] or field._squad_passages[0] != null:
+		failures.append("inspector correction limit was not applied")
+	field.queue_free()
+	await process_frame
+	field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	var obstacle := StaticBody3D.new()
+	obstacle.collision_layer = 1
+	obstacle.position = Vector3(-23.7, 1.5, -11.1)
+	var obstacle_shape := CollisionShape3D.new()
+	var obstacle_box := BoxShape3D.new()
+	obstacle_box.size = Vector3(1.0, 3.0, 1.0)
+	obstacle_shape.shape = obstacle_box
+	obstacle.add_child(obstacle_shape)
+	field.add_child(obstacle)
+	await physics_frame
+	for i in range(3):
+		field._squad_mates[0][i].position = Vector3(-25, 0.04, (i - 1) * 1.1)
+	field._set_squad_waypoint(1, near, false)
+	field._process_squad_movement(DELTA)
+	if not field._squad_blocked[0] or field._squad_passages[0] != null:
+		failures.append("obstructed route beyond the corrected exit was not blocked")
+	field.queue_free()
+	await process_frame
+	field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	await physics_frame
+	for i in range(3):
+		field._squad_mates[0][i].position = Vector3(-25 + (i - 1) * 2.7, 0.04, -12)
+	field._selected_squad_number = 1
+	field._set_squad_waypoint(1, origin, false)
+	field._set_squad_waypoint(1, near, true)
+	var queued_vertices: PackedVector3Array = field._waypoint_visual_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	if queued_vertices.size() < 36 or not queued_vertices[33].is_equal_approx(Vector3(-25.0, 0.06, -8.25)) or not queued_vertices[35].is_equal_approx(near + Vector3.UP * 0.06):
+		failures.append("queued route did not display the corrected exit")
+	completed = false
+	for frame in range(9000):
+		field._process_squad_movement(DELTA)
+		for mate in field._squad_mates[0]:
+			mate._process(DELTA)
+		if field._squad_blocked[0]:
+			break
+		if field._squad_waypoints[0].is_empty():
+			completed = true
+			break
+	if not completed:
+		failures.append("queued corrected route did not reach the original waypoint")
+	field.queue_free()
+	await process_frame
+	field = FIELD.instantiate()
+	field.set_process(false)
+	root.add_child(field)
+	await physics_frame
+	for i in range(3):
+		field._squad_mates[0][i].position = Vector3(-25, 0.04, (i - 1) * 1.1)
+	field._set_squad_waypoint(1, north, false)
+	completed = false
+	for frame in range(9000):
+		field._process_squad_movement(DELTA)
+		for mate in field._squad_mates[0]:
+			mate._process(DELTA)
+		if field._squad_blocked[0]:
+			break
+		if field._squad_waypoints[0].is_empty():
+			completed = true
+			break
+	if not completed:
+		failures.append("northbound correction did not reach the original waypoint")
+	field.queue_free()
+	await process_frame
 
 
 func _check_route_classification() -> void:

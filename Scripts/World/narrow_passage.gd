@@ -20,6 +20,7 @@ var members: Array = []
 var failed_reason := ""
 var stop_inside := false
 var replan_requested := false
+var route_correction: Dictionary = {}
 
 
 func _init(owner: Node3D, destination: Vector3, squad: Array, previous = null) -> void:
@@ -100,6 +101,73 @@ static func classify_route(squad_point: Vector3, destination: Vector3) -> RouteK
 	if _segment_intersects_rect(start, finish, passage):
 		return RouteKind.PASSAGE
 	return RouteKind.NORMAL
+
+
+static func get_exit_correction(origin: Vector3, destination: Vector3, tolerance: float) -> Dictionary:
+	# Assistance applies only when a unit is already inside and the direct
+	# segment clips a side wall while aiming just outside an exit opening.
+	if tolerance <= 0.0 or absf(origin.x - CENTER_X) >= 0.5 or origin.z <= FRONT_Z or origin.z >= BACK_Z:
+		return {}
+	if classify_route(origin, destination) != RouteKind.BLOCKED:
+		return {}
+	var exit_z: float
+	var direction: float
+	if destination.z < FRONT_Z:
+		exit_z = FRONT_Z
+		direction = -1.0
+	elif destination.z > BACK_Z:
+		exit_z = BACK_Z
+		direction = 1.0
+	else:
+		return {}
+	var progress := (exit_z - origin.z) / (destination.z - origin.z)
+	var exit_x := lerpf(origin.x, destination.x, progress)
+	var outside_opening := absf(exit_x - CENTER_X) - 0.5
+	if outside_opening <= 0.0 or outside_opening > tolerance + 0.00001:
+		return {}
+	var corrected_exit := Vector3(CENTER_X, destination.y, exit_z + direction * 1.25)
+	if classify_route(corrected_exit, destination) == RouteKind.BLOCKED:
+		return {}
+	return {"exit": corrected_exit}
+
+
+static func get_entry_correction(origin: Vector3, destination: Vector3, tolerance: float) -> Dictionary:
+	# Apply the same doorway tolerance to approaches from outside the passage.
+	# Both crossings must remain close enough when the goal is beyond the exit.
+	if tolerance <= 0.0 or classify_route(origin, destination) != RouteKind.BLOCKED:
+		return {}
+	var direction: float
+	var entry_z: float
+	var exit_z: float
+	if origin.z < FRONT_Z:
+		direction = 1.0
+		entry_z = FRONT_Z
+		exit_z = BACK_Z
+	elif origin.z > BACK_Z:
+		direction = -1.0
+		entry_z = BACK_Z
+		exit_z = FRONT_Z
+	else:
+		return {}
+	var destination_inside := destination.z > FRONT_Z and destination.z < BACK_Z and absf(destination.x - CENTER_X) < 0.5
+	var destination_beyond := direction * (destination.z - exit_z) > 0.0
+	if not destination_inside and not destination_beyond:
+		return {}
+	var delta_z := destination.z - origin.z
+	if is_zero_approx(delta_z):
+		return {}
+	var entry_progress := (entry_z - origin.z) / delta_z
+	var entry_x := lerpf(origin.x, destination.x, entry_progress)
+	if absf(entry_x - CENTER_X) - 0.5 > tolerance + 0.00001:
+		return {}
+	var correction := {"entry": Vector3(CENTER_X, destination.y, entry_z - direction * 0.65)}
+	if destination_beyond:
+		var exit_progress := (exit_z - origin.z) / delta_z
+		var exit_x := lerpf(origin.x, destination.x, exit_progress)
+		if absf(exit_x - CENTER_X) - 0.5 > tolerance + 0.00001:
+			return {}
+		correction["exit"] = Vector3(CENTER_X, destination.y, exit_z + direction * 1.25)
+	return correction
 
 
 static func _segment_intersects_rect(start: Vector2, finish: Vector2, rect: Rect2) -> bool:
